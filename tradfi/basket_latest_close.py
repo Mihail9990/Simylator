@@ -14,6 +14,10 @@ from .broker import Spec
 from .settings import number
 from copy import deepcopy
 
+class EntrySLPriceUnavailable(ActionRejected):
+    """No MODIFY staged: own-entry SL fails current price/stop/freeze checks."""
+
+
 RANGE_POLICY='last_actual_close_v2'
 
 class LatestCloseBasketController(OwnEntrySL,RecoveryWriteoff,ReverseLadderControl,ManualRangeControl,BasketController):
@@ -296,7 +300,7 @@ class LatestCloseBasketController(OwnEntrySL,RecoveryWriteoff,ReverseLadderContr
             if not live or number(live['size'])!=number(t['size']) or number(live['entry'])!=number(t['entry']):raise ActionRejected('Остаток или вход билета изменился; нужна сверка')
             anchor=t['entry']
             try:spec.protection(t['side'],number(t['entry']),number(anchor),number(live['tp']),snap['quote'],modify=True)
-            except (ValueError,ArithmeticError) as exc:raise ActionRejected('SL на входе пока недопустим по котировке или stop/freeze') from exc
+            except (ValueError,ArithmeticError) as exc:raise EntrySLPriceUnavailable('SL на входе пока недопустим по котировке или stop/freeze') from exc
             targets.append(dict(position_id=t['id'],sl=anchor,tp=live['tp'],old_sl=live['sl'],command_id=None))
         # Persist the one-shot marker and all targets before any broker intent.
         g['entry_sl_once']=dict(status='PREPARED',trigger=trigger_position_id,anchor_policy='own_entry_v1',targets=targets)
@@ -306,7 +310,7 @@ class LatestCloseBasketController(OwnEntrySL,RecoveryWriteoff,ReverseLadderContr
         from .broker import Spec
         from .settings import number
         c=self.state['cycle'];tx=g['entry_sl_once']
-        if tx['status'] in ('DONE','FAILED'):return False
+        if tx['status'] in ('DONE','FAILED','SKIPPED'):return False
         active=[]
         for target in tx['targets']:
             t=c['tickets'][target['position_id']]
@@ -338,6 +342,69 @@ class LatestCloseBasketController(OwnEntrySL,RecoveryWriteoff,ReverseLadderContr
         for target,t,live in active:t.update(sl=live['sl'],tp=live['tp'])
         tx['status']='DONE';self.save('entry_sl_once_confirmed');return False
 
+    def _paper_tp1_facts_safe(self,snap):
+        # This exception belongs only to the independent virtual exchange.
+        if (getattr(self.broker,'backend_id',None)!='paper_mt5_quotes_v1'
+                or self.state.get('backend')!='paper_mt5_quotes_v1'
+                or getattr(self.broker,'read_only',False)
+                or self.state.get('migration_block') or self.state.get('time_block')):return False
+        c=self.state.get('cycle') or {}
+        if (not c or self._unresolved() or snap.get('orders')
+                or any(c.get(k) for k in ('edit','manual_close','initial_cancel','v3_edit','v3_rearm','v3_relink','v3_link','v3_request','reconciliation_error'))
+                or any(r.get('status')=='UNKNOWN' for r in self.state.get('control_receipts',{}).values())):return False
+        if snap.get('quote',{}).get('utc_time') is None:return False
+        if any(g.get('entry_sl_once',{}).get('status') not in (None,'DONE','SKIPPED')
+               or g.get('actual_ladder_tx',{}).get('status') not in (None,'DONE') for g in c['groups']):return False
+        try:
+            live={p['id']:p for p in snap['positions']}
+            active={t['id']:t for t in c['tickets'].values() if not t['closed']}
+            if len(live)!=len(snap['positions']) or set(live)!=set(active):return False
+            spec=Spec.load(snap['spec'])
+            for pid,t in active.items():
+                p=live[pid]
+                if not p.get('owned') or p['side']!=t['side']:return False
+                if any(number(p[k])!=number(t[k]) for k in ('size','entry','sl','tp')):return False
+                for k in ('entry','sl','tp'):
+                    if spec.price(p[k])<=0:return False
+            return True
+        except (KeyError,ValueError,TypeError,ArithmeticError):return False
+
+    def _paper_tp1_skip(self,snap,g,trigger,*,persist=True):
+        # Explicitly not DONE: existing protection is retained, no MODIFY exists.
+        g['entry_sl_once']=dict(status='SKIPPED',trigger=trigger['id'],anchor_policy='own_entry_v1',
+            reason='PAPER_TP1_RETAINED_SL',targets=[],
+            retained=[{k:p[k] for k in ('id','sl','tp')} for p in snap['positions']
+                      if self.state['cycle']['tickets'][p['id']]['group']==g['id']])
+        if persist:self.save('paper_tp1_sl_skipped')
+
+    def _restore_paper_tp1_pause(self,snap):
+        c=self.state.get('cycle') or {}
+        if (not c.get('manual') or c.get('manual_reason')!='TP1_OWN_ENTRY_SL_UNAVAILABLE'
+                or self.state.get('phase')!='MANUAL' or not self._paper_tp1_facts_safe(snap)):return False
+        candidates=[]
+        for g in c['groups']:
+            if g['role']=='initial' or g.get('entry_sl_once'):continue
+            tickets=[t for t in c['tickets'].values() if t['group']==g['id']]
+            trigger=next((t for t in tickets if t.get('index')==0 and t.get('closed') is True
+                          and t.get('reason')=='TP' and t.get('exit_facts')),None)
+            if not trigger:continue
+            selected=[cid for cid in g['commands'] if self.state['commands'][cid]['side']==g.get('activated')]
+            if len(tickets)!=len(selected) or not self._group_indexes_valid(g,tickets):return False
+            candidates.append((g,trigger))
+        if not candidates:return False
+        # Revalidate the deadline, normally short-circuited by a manual latch.
+        # Any different protective reason takes precedence and stays latched.
+        c['manual']=False
+        if self._deadline_guard():return False
+        # One durable save publishes both skip and recovery. A failed save
+        # restores the former latch; a restart never repeats a MODIFY.
+        for g,trigger in candidates:self._paper_tp1_skip(snap,g,trigger,persist=False)
+        c.pop('manual_reason',None);c.pop('manual_since_utc',None)
+        self.state['phase']='RECOVERY_POSITION' if snap['positions'] else 'RECOVERY_WAIT'
+        self.notify('PAPER: перенос SL после TP1 пропущен; прежние SL/TP сохранены, сопровождение продолжается.')
+        self.save('paper_tp1_pause_recovered')
+        return True
+
     def _stage_first_tp_if_ready(self,snap):
         from .control import ActionRejected
         c=self.state['cycle']
@@ -350,6 +417,10 @@ class LatestCloseBasketController(OwnEntrySL,RecoveryWriteoff,ReverseLadderContr
             selected=[cid for cid in g['commands'] if self.state['commands'][cid]['side']==g.get('activated')]
             if len(tickets)!=len(selected):return False
             try:self.stage_entry_sl_once(g['id'],trigger['id'])
+            except EntrySLPriceUnavailable:
+                if self._paper_tp1_facts_safe(snap):
+                    self._paper_tp1_skip(snap,g,trigger);return False
+                self._halt(snap,'TP1_OWN_ENTRY_SL_UNAVAILABLE');return True
             except ActionRejected:
                 self._halt(snap,'TP1_OWN_ENTRY_SL_UNAVAILABLE');return True
             return True
@@ -358,6 +429,7 @@ class LatestCloseBasketController(OwnEntrySL,RecoveryWriteoff,ReverseLadderContr
     def _step(self,snap):
         if not self._observe(snap):return
         c=self.state['cycle']
+        if c.get('manual'):self._restore_paper_tp1_pause(snap)
         if c.get('manual'):return super()._step(snap)
         for g in c['groups']:
             if self._advance_actual_ladder(snap,g):return

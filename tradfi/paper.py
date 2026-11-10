@@ -209,6 +209,10 @@ class PaperSession:
             before=time.perf_counter(); self.exchange.observe(market); marks['observe_ms']=(time.perf_counter()-before)*1000
             before=time.perf_counter()
             if not self.exchange.p['paused_gap']:self.controller.tick()
+            elif (self.controller.state.get('cycle') or {}).get('manual_reason')=='TP1_OWN_ENTRY_SL_UNAVAILABLE':
+                # Recover only this obsolete policy latch; the independent
+                # restart/data-gap pause still requires explicit PAPER resume.
+                self.controller._restore_paper_tp1_pause(self.controller.snapshot())
             marks['tick_ms']=(time.perf_counter()-before)*1000
             self.snapshot=self.exchange.snapshot()
             self._execution_ok=True

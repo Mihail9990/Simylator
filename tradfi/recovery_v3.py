@@ -472,6 +472,7 @@ class ControlledRecoveryController(LatestCloseBasketController):
         if not self._v3():return
         c=self.state['cycle']
         if not self._observe(snap):return
+        if c.get('manual'):self._restore_paper_tp1_pause(snap)
         if c.get('manual'):
             self._cancel(snap,c['entries']);return
         if self._advance_entry_cancel(snap):return

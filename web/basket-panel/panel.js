@@ -257,7 +257,8 @@
   $('v3-link-toggle').dataset.cancel=String(linked);
   $('v3-link-toggle').disabled=blocked||!enabled||(linked?!canCancel:controls.can_link!==true);
   const link=view?.v3_link;
-  $('v3-link-status').textContent=linked?(link.cancel?'Отмена запрошена; ожидается сверка MT5.':link.replace?'Перенос SL и связанных триггеров; ожидается сверка.':profileSummary(link.recovery_profile)+' · '+link.side+' STOP на '+link.price+'. Якорь — SL первой ступени.'):'Триггеры не выставлены. После выставления они связаны с SL первой ступени.';
+  $('v3-link-status').textContent=linked?(link.cancel?'Отмена запрошена; ожидается сверка MT5.':link.replace?'Перенос SL и связанных триггеров; ожидается сверка.':profileSummary(link.recovery_profile)+' · '+link.side+' STOP на '+link.price+'.'):'';
+  $('v3-link-status').hidden=!linked;
   $('v3-control-reason').textContent=!v3Fresh?(mode==='paper'&&paperServerReady?'Свежесть данных проверяется сервером при выполнении команды.':'Ожидание данных сервера.'):friendlyReason(controls.reason);
   $('v3-cancel-entry').hidden=controls.can_cancel_entry!==true;
   $('v3-cancel-entry').disabled=blocked||!enabled||controls.can_cancel_entry!==true;
@@ -423,7 +424,8 @@
   notice('activity-recovery',money(negative,metrics?.currency),'info');
   const total=metrics?.all_closed_net;
   notice('activity-total-net',money(total,metrics?.currency),total===null||total===undefined?'info':Number(total)<0?'loss':'success');
-  $('activity-totals-note').textContent=metrics?.history_complete===true?'Общий результат: закрытые позиции с комиссиями, без плавающего P/L.':'Общий результат недоступен: история исполнений неполна.';
+  $('activity-totals-note').textContent=metrics?.history_complete===true?'':'Общий результат недоступен: история исполнений неполна.';
+  $('activity-totals-note').hidden=metrics?.history_complete===true;
   const records=Array.isArray(view?.position_history)?view.position_history:[];
   $('position-history-note').textContent=metrics?.history_note??(metrics?.history_complete===true?'':'Нет подтверждённой полной истории.');
   $('position-history-empty').textContent=records.length?'':'Исполненных позиций пока нет.';
@@ -449,11 +451,8 @@
   $('phase').textContent=view.phase;$('cycle').textContent=view.cycle_id??'Ожидание цикла';$('debt').textContent=view.debt+' UST';$('realized').textContent='Учёт с переносом: '+view.realized+' UST';$('feed-status').textContent=view.feed.status;$('mode').textContent=mode==='paper'?'PAPER · без реальных сделок':view.read_only?'READ_ONLY':view.stopped?'Новые входы остановлены':'EXECUTION';
   $('safety').textContent=''; // Safety reasons remain visible in the colored activity area, without duplicate raw labels.
   $('quote').textContent='Bid '+(view.feed.quote?.bid??'—')+' / Ask '+(view.feed.quote?.ask??'—')+' · возраст '+(view.feed.age_seconds??'—')+' сек.';
-  $('execution-note').textContent=mode==='paper'?'Это только модель. Нет реальных ордеров и брокерских SL/TP. Закрытие браузера не останавливает симуляцию.':'Открытые билеты сохраняют брокерские SL/TP. Закрытие браузера не останавливает сервис.';
   $('source-label').textContent=(mode==='paper'?'Источник: MT5 read-only / бумажные исполнения':'Источник: MT5 / торговый контур')+' · '+(utcLabel(view.feed.timestamp)||'время MT5 не проверено');
   if(mode==='paper'){$('paper-status').textContent=view.paper?.paused_gap?'Перерыв данных или перезапуск. Пропущенные исполнения не восстанавливаются; подтвердите продолжение.':'Моделируются только наблюдаемые свежие тики. Пропущенный путь цены неизвестен.';if(document.activeElement!==$('paper-cost'))$('paper-cost').value=view.paper?.commission_per_lot_side??'0';}
-  $('reverse-status').textContent=(view.reverse_ladders??[]).some(x=>x.enabled)?'Обратная лестница включена. Фактические SL показаны на графике; автоматического подтягивания нет.':'Обратная лестница выключена; доступна после подтверждённого переноса SL по TP1.';
-  $('projection').textContent=view.projection?'Прибыль по текущим TP: '+view.projection.gross_tp+'; резерв расходов: '+view.projection.cost_reserve+'; ожидаемое недопокрытие: '+view.projection.shortfall+' UST.'+(mode==='paper'?' Это модель; ставка расходов задаётся в симуляторе.':' Будущие комиссии неизвестны до подтверждения.'):'Расчёт покрытия пока недоступен.';
   $('edit-status').textContent=view.edit?'Правка '+view.edit.stage+': показываются фактические данные брокера. При частичном отказе автоматизация остановится.':'';$('journal').textContent=view.journal.join('\n');
   $('request-status').textContent=pending?'Запрос '+pending+': '+(pendingScope===view.scope?view.action_results[pending]?.status??'ожидание':'другой контекст')+'. До сверки новые команды запрещены. При UNKNOWN проверьте журнал и брокера на VPS; перезагрузка не разрешает повтор.':'';
   for(const id of ['start','stop','resume','reset','cancel-initial','save-settings','reverse-enable','reverse-disable','save-tp-grid','apply-level','paper-resume','paper-flatten','paper-save-cost'])$(id).disabled=!!pending||busy;
