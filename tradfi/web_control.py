@@ -13,7 +13,7 @@ import time
 import socket
 from .web_auth import validate_password
 from urllib.parse import urlsplit, parse_qs
-from .control import OwnerMailbox, ActionGateway
+from .control import OwnerMailbox, ActionGateway, SnapshotStale, Conflict
 from pathlib import Path
 
 def panel_html(body, role):
@@ -134,6 +134,10 @@ class WebTransport:
                 return reply(409, {'error': 'SCOPE_CHANGED'})
             try:
                 return reply(202, mailbox.submit(json.loads(body)))
+            except SnapshotStale as exc:
+                return reply(409, {'error': exc.code})
+            except Conflict:
+                return reply(409, {'error': 'ACTION_CONFLICT'})
             except (ValueError, TypeError):
                 return reply(400, {'error': 'INVALID_ACTION'})
             except queue.Full:

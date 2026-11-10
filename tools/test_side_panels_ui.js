@@ -3,7 +3,7 @@
 const {chromium}=require('playwright');
 const fs=require('fs'),path=require('path'),assert=require('assert');
 const root=path.resolve(__dirname,'../web/basket-panel'),paper=root.includes('Simylator'),profile={id:'six',name:'Six exact stages',stages:Array.from({length:6},(_,i)=>({volume:'0.01',tp_distance:String((i+1)*.25)})),total_volume:'0.06',sl_distance:'1.5'};
-const state={contract:'ticket_basket_v1',mode:paper?'PAPER':'LIVE',scope:paper?'PAPER-fixture':'live-ui',revision:1,cycle_id:'c1',phase:'RECOVERY',debt:'5',realized:'0',stopped:true,read_only:false,settings:{INITIAL_SIZE:'0.09',INITIAL_ENTRY_DISTANCE:'1',INITIAL_SL_DISTANCE:'3',INITIAL_TP_DISTANCE:'.25',BASKET_COUNT:6,TICKET_SIZE:'.01',RECOVERY_SL_DISTANCE:'1.5',EXPANSION_DISTANCE:'1',CYCLE_COOLDOWN_SECONDS:'0'},feed:{status:'FRESH',timestamp_semantics:'VERIFIED',quote:{bid:'4000',ask:'4000.23'},age_seconds:0,candles:[]},levels:{},positions:[],orders:[],journal:[],action_results:{},recovery_mode:'V3',v3_settings:{entry_distance:'1',count_presets:[4,6,10]},v3_sl_distance:'1.5',v3_controls:{can_enter:true,can_link:true,can_cancel_link:false,can_adjust_sl:true},recovery_profiles:{selected_profile_id:'six',profiles:[profile,{id:'one',name:'One 0.10',stages:[{volume:'0.10',tp_distance:'1.25'}]}],recovery_sl_distance:'1.5'},selected_recovery_profile:profile,current_recovery_profiles:[{...profile,group_id:'frozen-1'}],paper:{history:[]}};
+const state={contract:'ticket_basket_v1',snapshot_freshness:{fresh:true,age_seconds:0,max_age_seconds:2},mode:paper?'PAPER':'LIVE',scope:paper?'PAPER-fixture':'live-ui',revision:1,cycle_id:'c1',phase:'RECOVERY',debt:'5',realized:'0',stopped:true,read_only:false,settings:{INITIAL_SIZE:'0.09',INITIAL_ENTRY_DISTANCE:'1',INITIAL_SL_DISTANCE:'3',INITIAL_TP_DISTANCE:'.25',BASKET_COUNT:6,TICKET_SIZE:'.01',RECOVERY_SL_DISTANCE:'1.5',EXPANSION_DISTANCE:'1',CYCLE_COOLDOWN_SECONDS:'0'},feed:{status:'FRESH',timestamp_semantics:'VERIFIED',quote:{bid:'4000',ask:'4000.23'},age_seconds:0,candles:[]},levels:{},positions:[],orders:[],journal:[],action_results:{},recovery_mode:'V3',v3_settings:{entry_distance:'1',count_presets:[4,6,10]},v3_sl_distance:'1.5',v3_controls:{can_enter:true,can_link:true,can_cancel_link:false,can_adjust_sl:true},recovery_profiles:{selected_profile_id:'six',profiles:[profile,{id:'one',name:'One 0.10',stages:[{volume:'0.10',tp_distance:'1.25'}]}],recovery_sl_distance:'1.5'},selected_recovery_profile:profile,current_recovery_profiles:[{...profile,group_id:'frozen-1'}],paper:{history:[]}};
 state.feed.candles=Array.from({length:300},(_,i)=>({utc_time:1700000000+i*60,open:'3999.90',close:'4000.10',high:'4000.25',low:'3999.80'}));
 (async()=>{
  const browser=await chromium.launch({executablePath:process.env.CHROMIUM_PATH||'/usr/bin/chromium',headless:true,args:['--no-sandbox']});
@@ -31,7 +31,7 @@ state.feed.candles=Array.from({length:300},(_,i)=>({utc_time:1700000000+i*60,ope
   await page.locator('#close-sl-panel').click();assert(await page.locator('#v3-sl-panel').evaluate(n=>n.inert));
   await page.locator('#toggle-entry-panel').click();await page.locator('#v3-submit-entry').click();
   await page.waitForTimeout(200);assert.equal(actions.at(-1).action.type,'v3_entry');assert.equal(dialogs.length,0);
-  assert.equal(await page.locator('#action-error').getAttribute('data-tone'),'success');
+  assert.equal(await page.locator('#bot-activity-action').getAttribute('data-tone'),'success');
   current.v3_controls.can_cancel_entry=true;current.v3_controls.can_enter=false;await page.waitForTimeout(1200);
   await page.locator('#v3-cancel-entry').click();await page.waitForTimeout(100);assert.equal(actions.at(-1).action.type,'v3_cancel_entry');
   assert.deepEqual(Object.keys(actions.at(-1).action).sort(),['cycle_id','type']);
@@ -45,7 +45,7 @@ state.feed.candles=Array.from({length:300},(_,i)=>({utc_time:1700000000+i*60,ope
   await page.locator('#tab-settings').click();assert(await page.locator('#v3-entry-panel').evaluate(n=>n.inert));
   await page.locator('#tab-chart').click();assert.equal(await page.locator('#v3-entry-panel').getAttribute('data-open'),'false');
   await page.setViewportSize({width,height:480});await page.locator('#toggle-entry-panel').click();
-  const bounds=await page.locator('#v3-entry-panel').boundingBox();assert(bounds.height>100&&bounds.height<480);
+  const bounds=await page.locator('#v3-entry-panel').boundingBox();const chartBounds=await page.locator('#chart-page').boundingBox();assert(bounds.height>0&&bounds.height<=chartBounds.height*.42+1);assert(bounds.y>chartBounds.y,'compact drawer anchors below chart top');
   assert.deepEqual(errors,[]);await page.close();console.log('PASS side drawers, direct STOP, cancel, notices, settings and landscape at '+width);
  }}finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

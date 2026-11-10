@@ -132,7 +132,7 @@ class PaperSession:
         self.controller=ControlledRecoveryController(self.store,self.exchange,clock=clock,monotonic=monotonic)
         from .paper_interrupt import recover_receipts
         recover_receipts(self)
-        self.scope=self.exchange.account;self.gateway=ActionGateway(self.controller,execute=self.action);self.mailbox=OwnerMailbox();self.snapshot=None
+        self.scope=self.exchange.account;self.gateway=ActionGateway(self.controller,execute=self.action);self.mailbox=OwnerMailbox(monotonic=monotonic,max_age_seconds=2);self.snapshot=None
         self.presentation=None
     def _fresh(self):
         try:return self.exchange.snapshot()

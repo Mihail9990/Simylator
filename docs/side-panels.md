@@ -69,3 +69,14 @@ candle, without cancellation, closing orders, or changing realized P/L. A persis
 waiver offset prevents the old debt from returning; subsequent losses accrue again.
 Two fresh snapshots and closed-ticket evidence protect against fills/reconciliation
 races. PAPER interruption/manual reconciliation also respect the prior waiver.
+
+### Compact notifications and signed result
+The notification area retains stale-snapshot, rejected-command/order and unknown-outcome messages. Role/count boilerplate and duplicate lower-chart receipts were removed; generic caught errors now appear in the upper notification area. Command controls and freshness guards are unchanged. A known negative overall result is red; a known zero/positive result is green; unavailable totals remain neutral with the incomplete-history explanation. RECOVERY stays lime.
+The notification area's vertical clamp is 10% larger (123.2px / 17.6dvh / 171.6px). Totals-row vertical padding and typography are 95% of their former size; width is unchanged. Browser geometry remains unverified in the restricted environment.
+
+### Compact lower-chart drawers
+Both independent drawers now open from the lower chart edge with internal scrolling and bounded height, leaving the upper chart visible. SL shows its heading, minus/value/plus, Confirm and close. Supporting safety instructions remain screen-reader accessible. Minus/plus stage an exact decimal distance only; Confirm sends one guarded request. Closing the SL drawer discards the draft. Scope, cycle, revision, actual SL or position-set changes invalidate it, and equivalent decimal values never send a redundant edit.
+The Orders drawer uses compact two-column selectors and retains every placement/cancellation action. Longer direction, distance and profile descriptions remain under expandable Parameters. Browser geometry is not claimed verified.
+
+### Half-second PAPER refresh and freshness deadlines
+The simulator browser requests state every 500 ms. A pending fetch or action prevents overlapping polls; this does not manufacture new MT5 ticks or guarantee network latency. HTTP 200 alone does not establish freshness: the browser requires a current publication-age envelope, subtracts request transit time, and independently expires the quote deadline. A timer and action-time guards prevent using a stalled cached snapshot. Safe emergency Stop and time re-verification remain available; new exposure and protection edits require fresh evidence. Source WAITING/unverified states are never promoted to fresh by polling.

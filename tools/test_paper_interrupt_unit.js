@@ -7,7 +7,7 @@ assert(html.includes('id="paper-interrupt">Прервать цикл'));
 const elements={'paper-interrupt':{}};
 const state={scope:'PAPER-fixture',revision:7,cycle_id:'cycle-1',positions:[{id:'position-1'}],orders:[{id:'order-1'}],paper:{paused_gap:false,commission_per_lot_side:'2'},feed:{status:'FRESH'}};
 let approve=false,calls=[],dialogs=[];
-const ctx=vm.createContext({$:id=>elements[id],mode:'paper',view:state,v3Fresh:true,pending:null,busy:false,
+const ctx=vm.createContext({$:id=>elements[id],mode:'paper',view:state,v3Fresh:true,quoteCurrent:()=>ctx.v3Fresh,pending:null,busy:false,
  confirm:text=>{dialogs.push(text);return approve;},send:async(...args)=>{calls.push(args);ctx.pending='pending-id';},error:message=>assert.fail(message)});
 vm.runInContext(source.slice(source.indexOf(' // Explicit PAPER-only settlement.'),source.indexOf(" $('paper-flatten').onclick=")),ctx);
 (async()=>{
