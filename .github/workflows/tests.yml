@@ -1,0 +1,21 @@
+name: Simulator checks
+on: [push, pull_request]
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - run: python tools/run_offline_tests.py
+      - run: node tools/test_v3_panel_unit.js
+      - run: node tools/test_chart_height_unit.js
+      - run: node tools/test_bot_activity_unit.js
+      - run: python tools/test_chart_layout_structure.py
+      - run: python -m compileall -q tradfi independent_install.py install_tradfi.py paper_https_setup.py https_common.py
+      - run: python tradfi_main.py

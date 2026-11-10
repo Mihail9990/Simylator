@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.env
+tradfi_paper_config.json
+service.json
+*.sqlite3*
+*.db*
+*.log*
+*.credentials.json
+*.diagnostic.jsonl*
+data/
+releases/
+backups/
+failed/
+node_modules/
