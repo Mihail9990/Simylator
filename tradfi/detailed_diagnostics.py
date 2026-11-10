@@ -10,9 +10,10 @@ STATUSES = {'APPLIED', 'REJECTED', 'UNKNOWN', 'CONFLICT', 'OK', 'UNAVAILABLE'}
 ERRORS = {'ActionRejected', 'SnapshotStale', 'ValueError', 'OSError', 'TimeoutError', 'ConnectionError', 'QuoteFreshnessError'}
 ACTIONS = {'command', 'paper_interrupt', 'paper_resume', 'paper_flatten', 'paper_costs', 'settings', 'edit', 'recovery_writeoff', 'cancel_trigger', 'protection', 'OTHER'}
 ACTIONS.update({'start','modules','triggers','delete_trigger','close_position','recovery_profiles','recovery_profile_select','v3_settings','v3_entry','v3_link','v3_cancel_link','v3_cancel_entry','v3_cancel_request','v3_adjust_sl','reverse_ladder','manual_close','writeoff_recovery'})
-CODES = {'SNAPSHOT_STALE','FEED_STALE','SCOPE_CHANGED','ACTION_CONFLICT','INVALID_ACTION','QUEUE_FULL','INVALID_LOG_REQUEST','AUTH_REQUIRED','SESSION_EXPIRED','ORIGIN_DENIED','HEADER_REQUIRED','AUTH_NOT_CONFIGURED','BOUNDED_JSON_REQUIRED','INVALID_LOGIN','LOGIN_RATE_LIMIT','AUTH_FAILED','SESSION_LIMIT','LOGS_UNAVAILABLE','NOT_FOUND'}
+CODES = {'QUEUE_EXPIRED','CONTEXT_CHANGED','SNAPSHOT_STALE','FEED_STALE','SCOPE_CHANGED','ACTION_CONFLICT','INVALID_ACTION','QUEUE_FULL','INVALID_LOG_REQUEST','AUTH_REQUIRED','SESSION_EXPIRED','ORIGIN_DENIED','HEADER_REQUIRED','AUTH_NOT_CONFIGURED','BOUNDED_JSON_REQUIRED','INVALID_LOGIN','LOGIN_RATE_LIMIT','AUTH_FAILED','SESSION_LIMIT','LOGS_UNAVAILABLE','NOT_FOUND'}
 COMMANDS = {'/start', '/stop', '/status', '/reset_manual', '/resume_time'}
-NUMBERS = {'sequence', 'at_utc', 'duration_ms', 'read_ms', 'observe_ms', 'tick_ms', 'publish_ms', 'revision', 'queue_depth', 'positions_count', 'orders_count', 'quote_age_seconds', 'dropped_records','http_status'}
+GUARD_STAGES = {'submit','execution_queue','execution_current','execution_context','execution_preview','execution_published'}
+NUMBERS = {'snapshot_age_seconds','queue_age_seconds','reservation_ms','sequence', 'at_utc', 'duration_ms', 'read_ms', 'observe_ms', 'tick_ms', 'publish_ms', 'revision', 'queue_depth', 'positions_count', 'orders_count', 'quote_age_seconds', 'dropped_records','http_status'}
 
 
 def sanitize(row):
@@ -23,7 +24,7 @@ def sanitize(row):
         value = row.get(key)
         if type(value) in (int, float) and -1e15 <= value <= 1e15 and math.isfinite(value):
             safe[key] = value
-    for key, allowed in (('status', STATUSES), ('error_type', ERRORS), ('action', ACTIONS), ('command', COMMANDS), ('error_code', CODES)):
+    for key, allowed in (('status', STATUSES), ('error_type', ERRORS), ('action', ACTIONS), ('command', COMMANDS), ('error_code', CODES), ('guard_stage', GUARD_STAGES)):
         value = row.get(key)
         if isinstance(value, str) and value in allowed:
             safe[key] = value

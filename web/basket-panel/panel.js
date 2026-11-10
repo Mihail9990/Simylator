@@ -23,6 +23,7 @@
 
  function clearPending(){pending=null;pendingScope=null;localStorage.removeItem(storageKey('request'));localStorage.removeItem(storageKey('scope'));}
  async function send(action,revision=view?.revision,scope=view?.scope){
+  const contextToken=view?.command_context_token;
   const safeRecovery=action.type==='command'&&['/stop','/resume_time'].includes(action.text);
   if(busy||pending)throw Error('Предыдущий исход не сверён. Повтор запрещён.');
   if(!view||scope!==view.scope)throw Error('Контекст изменился; обновите данные.');
@@ -38,7 +39,7 @@
   if(!quoteCurrent()&&!safeRecovery&&!(mode==='paper'&&paperServerReady))throw Error('Нет свежей подтверждённой котировки. Команда не отправлена.');
   if(busy||pending)throw Error('Предыдущий исход не сверён. Повтор запрещён.');
   if(!view||scope!==view.scope)throw Error('Контекст изменился; обновите данные.');
-  const request={id:crypto.randomUUID(),revision,action};pending=request.id;pendingScope=scope;localStorage.setItem(storageKey('request'),pending);localStorage.setItem(storageKey('scope'),scope);busy=true;lastActionReceipt=null;notice('action-error','');updateBotActivity();
+  const request={id:crypto.randomUUID(),revision,action,...(!safeRecovery&&typeof contextToken==='string'?{context_token:contextToken}:{})};pending=request.id;pendingScope=scope;localStorage.setItem(storageKey('request'),pending);localStorage.setItem(storageKey('scope'),scope);busy=true;lastActionReceipt=null;notice('action-error','');updateBotActivity();
   try{const r=await fetch(apiPath('action'),{method:'POST',headers:{...headers(),'Content-Type':'application/json'},body:JSON.stringify(request),signal:AbortSignal.timeout(4000)});
    if(!r.ok){if([400,401,403,409,413,429].includes(r.status))clearPending();throw Error(r.status===409?'Снимок устарел; обновите данные.':'Команда отклонена сервером.');}
    const receipt=await r.json();lastActionReceipt={status:receipt.status,reason:receipt.reason};if(['APPLIED','REJECTED','CONFLICT'].includes(receipt.status))clearPending();if(preview&&receipt.status!=='APPLIED')$('preview-error').textContent=actionReceiptText(receipt.status,receipt.reason);
@@ -47,7 +48,7 @@
  function commandContext(v){
   // Exclude moving quotes/PnL, but preserve every decision/settings/obligation
   // shown before confirmation. Never silently rebase the confirmed revision.
-  const keys=['scope','revision','cycle_id','phase','stopped','settings','active_settings','tp_distances','recovery_mode','v3_settings','recovery_profiles','selected_recovery_profile','v3_request','v3_link','manual_reason','migration_block','time_block','read_only'];
+  const keys=['scope','revision','command_context_token','cycle_id','phase','stopped','settings','active_settings','tp_distances','recovery_mode','v3_settings','recovery_profiles','selected_recovery_profile','v3_request','v3_link','manual_reason','migration_block','time_block','read_only'];
   const stable=x=>Array.isArray(x)?x.map(stable):x&&typeof x==='object'?Object.fromEntries(Object.keys(x).sort().map(k=>[k,stable(x[k])])):x;
   return JSON.stringify(stable(Object.fromEntries([...keys.map(k=>[k,v?.[k]]),...['positions','orders'].map(k=>[k,(v?.[k]??[]).map(x=>({id:x.id,side:x.side,volume:x.volume,size:x.size,entry:x.entry,price:x.price,status:x.status,command_id:x.command_id,sl:x.sl,tp:x.tp})).sort((a,b)=>String(a.id).localeCompare(String(b.id)))])])));
  }

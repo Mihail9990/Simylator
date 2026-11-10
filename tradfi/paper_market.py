@@ -1,7 +1,7 @@
 """Capability-limited MT5 market reader. No order, position or trade calls; identity/currency only from account metadata."""
 from copy import deepcopy
 from types import SimpleNamespace
-from .native_time import NativeUTCVerifier
+from .native_time import NativeUTCVerifier, minute_boundary_race
 from .time_profile import market_timestamp_to_utc, market_tick_to_utc, validate_market_time_offset
 from .time_safety import TimeSafety
 from .broker import Spec
@@ -43,12 +43,18 @@ class MarketReader:
             quote=dict(bid=str(bid),ask=str(ask),utc_time=None),candles=candles)
         return deepcopy(self.raw)
     def read(self):
+        started=self.monotonic()
+        self._minute_race=False
         try:
-            return self._read_verified()
+            try:
+                return self._read_verified()
+            except OSError:
+                if not self._minute_race or not 0<=self.monotonic()-started<2:raise
+                return self._read_verified(read_started=started)
         except Exception:
             self.reason=self.reason or 'WAIT_FRESH_MT5'
             raise
-    def _read_verified(self):
+    def _read_verified(self,read_started=None):
         self.read_raw()
         self.safety.poll_refresh()
         if self.monotonic()>=self.next_check:self.safety.request_refresh();self.next_check=self.monotonic()+30
@@ -60,7 +66,7 @@ class MarketReader:
         if account.currency!='UST' or account.server!='Bybit-Live-6':raise ValueError('Unsupported source currency/server')
         if self._expected_account is None:self._expected_account=identity
         if identity!=self._expected_account:raise OSError('MT5_SOURCE_IDENTITY_CHANGED')
-        before=self.monotonic();info=self._info(self.symbol);tick=self._tick(self.symbol);bars=self._bars(self.symbol,self.tf,0,120)
+        before=self.monotonic() if read_started is None else read_started;info=self._info(self.symbol);tick=self._tick(self.symbol);bars=self._bars(self.symbol,self.tf,0,120)
         now=self.safety.trusted_utc()
         if now is None:raise OSError('MT5_UTC_WAIT_REFERENCE')
         if info is None or not info.visible or tick is None or bars is None or len(bars)<2:raise OSError('WAIT_FRESH_MT5')
@@ -80,7 +86,10 @@ class MarketReader:
             if number(row['low'])<=0 or number(row['low'])>min(number(row['open']),number(row['close'])) or number(row['high'])<max(number(row['open']),number(row['close'])):raise ValueError('Invalid OHLC')
             candles.append(row)
         candles.sort(key=lambda b:b['utc_time']);current=int(float(stamp)//60)*60
-        if len({b['utc_time'] for b in candles})!=len(candles) or [b['utc_time'] for b in candles[-2:]]!=[current-60,current]:raise OSError('WAIT_FRESH_M1')
+        if len({b['utc_time'] for b in candles})!=len(candles):raise OSError('WAIT_FRESH_M1')
+        if [b['utc_time'] for b in candles[-2:]]!=[current-60,current]:
+            self._minute_race=minute_boundary_race(float(stamp),[b['utc_time'] for b in candles[-2:]],now)
+            raise OSError('WAIT_FRESH_M1')
         self.last=dict(source='MT5_READ_ONLY',symbol=self.symbol,timestamp_semantics='VERIFIED',status='FRESH',timestamp=float(stamp),tick_msc=int(tick.time_msc),
             quote=dict(bid=str(bid),ask=str(ask),utc_time=float(stamp)),candles=candles,spec=spec,
             candle=dict(id=int(candles[-2]['utc_time']),open=candles[-2]['open'],close=candles[-2]['close']))

@@ -37,6 +37,20 @@ class DetailedTests(unittest.TestCase):
         trace.action('action_reserved', {'id':'12345678-1234-1234-1234-123456789abc','action':{'type':'command','text':'/start'}})
         self.assertEqual(trace.drain()[-1]['receipt_id'],'12345678-1234-1234-1234-123456789abc')
 
+    def test_guard_evidence_is_strictly_allowlisted(self):
+        row=sanitize(dict(event='action_completed', error_code='QUEUE_EXPIRED',
+                          guard_stage='execution_queue', queue_age_seconds=3.1,
+                          snapshot_age_seconds=2.2, quote_age_seconds=.2, reservation_ms=12,
+                          password='secret', raw_exception='secret'))
+        self.assertEqual(row['guard_stage'],'execution_queue')
+        self.assertEqual(row['error_code'],'QUEUE_EXPIRED')
+        self.assertEqual(row['queue_age_seconds'],3.1)
+        self.assertNotIn('secret',json.dumps(row))
+        rejected=sanitize(dict(event='action_completed', guard_stage='secret-stage',
+                               error_code='secret-code', queue_age_seconds=float('inf')))
+        self.assertNotIn('guard_stage',rejected);self.assertNotIn('error_code',rejected)
+        self.assertNotIn('queue_age_seconds',rejected)
+
     def test_clock_failure_cannot_break_recording(self):
         def bad():raise OSError('secret')
         trace=DetailedDiagnostics(bad)

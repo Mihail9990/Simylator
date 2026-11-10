@@ -60,9 +60,9 @@ class WebTransport:
         headers = {k.lower(): v for k, v in headers.items()}
         origin = self.origin
 
-        def reply(code, value, cookie=None):
+        def reply(code, value, cookie=None, **diagnostic):
             if code >= 400 and self.diagnostics is not None:
-                self.diagnostics.record('transport_rejected', error_code=value.get('error'), http_status=code)
+                self.diagnostics.record('transport_rejected', http_status=code, **dict(diagnostic, error_code=value.get('error')))
             return (code, value, {'Set-Cookie': cookie} if cookie else {})
         if headers.get('host') != self.authority or headers.get('origin', origin) != origin:
             return reply(403, {'error': 'ORIGIN_DENIED'})
@@ -138,7 +138,7 @@ class WebTransport:
             try:
                 return reply(202, mailbox.submit(json.loads(body)))
             except SnapshotStale as exc:
-                return reply(409, {'error': exc.code})
+                return reply(409, {'error': exc.code}, **exc.evidence)
             except Conflict:
                 return reply(409, {'error': 'ACTION_CONFLICT'})
             except (ValueError, TypeError):

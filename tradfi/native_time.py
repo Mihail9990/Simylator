@@ -11,10 +11,18 @@ class NativeUTCVerifier:
         self.observation=None
         self.reason='MT5_UTC_WAIT_REFERENCE'
     def __call__(self):
+        start=self.broker.monotonic()
+        self._minute_race=False
+        result=self._check(start)
+        # One owner-thread reread only; both attempts share the original budget.
+        if not result and self._minute_race and 0<=self.broker.monotonic()-start<2:
+            result=self._check(start)
+        return result
+    def _check(self,start):
         self.observation=None
         # External HTTPS measurement workers must never call the MT5 API.
         if threading.get_ident()!=self.owner:return False
-        b=self.broker;start=b.monotonic();reference=self.safety.trusted_utc()
+        b=self.broker;reference=self.safety.trusted_utc()
         if reference is None:self.reason='MT5_UTC_WAIT_REFERENCE';return False
         try:
             tick=b.api.symbol_info_tick(b.symbol)
@@ -44,7 +52,16 @@ class NativeUTCVerifier:
             if now-stamp>b.max_age:self.reason='MT5_UTC_WAIT_FRESH_DATA';return False
             current=int(stamp//60)*60
             if sorted(times)!=[current-60,current] or current!=int(now//60)*60:
+                self._minute_race=minute_boundary_race(stamp,times,now)
                 self.reason='MT5_UTC_WAIT_FRESH_DATA';return False
             self.reason=None;return True
         except Exception:
             self.reason='MT5_UTC_WAIT_FRESH_DATA';return False
+
+
+def minute_boundary_race(stamp,times,now):
+    """Only adjacent-minute coherent pairs qualify; never relax acceptance."""
+    current=int(stamp//60)*60
+    observed=int(now//60)*60
+    return (observed-current in (0,60) and sorted(times) in
+            ([current-60,current], [current,current+60], [current-120,current-60]))

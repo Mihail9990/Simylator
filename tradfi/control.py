@@ -25,9 +25,14 @@ class ActionRejected(ValueError):
 
 
 class SnapshotStale(ActionRejected):
-    """The cached preview no longer permits a new PAPER action."""
-    def __init__(self, code):
-        super().__init__(code, public_message='Снимок или котировка устарели. Дождитесь свежих данных и подтвердите действие заново.')
+    """A bounded data/queue/context guard refused before any command effect."""
+    def __init__(self, code, *, stage=None, snapshot_age=None, quote_age=None, queue_age=None):
+        self.evidence = dict(error_code=code, guard_stage=stage, snapshot_age_seconds=snapshot_age, quote_age_seconds=quote_age, queue_age_seconds=queue_age)
+        message = {'QUEUE_EXPIRED':'Команда слишком долго ожидала выполнения и не выполнена. Подтвердите действие заново.',
+                   'CONTEXT_CHANGED':'Состояние или параметры изменились. Команда не выполнена; проверьте данные и подтвердите заново.',
+                   'FEED_STALE':'Нет свежих проверенных котировок сервера. Команда не выполнена.'}.get(code,
+                   'Снимок или котировка устарели. Дождитесь свежих данных и подтвердите действие заново.')
+        super().__init__(code, public_message=message)
         self.code = code
 
 
@@ -36,10 +41,12 @@ def _request_digest(request):
 
 
 def validate_request(request):
-    if not isinstance(request, dict) or set(request) != {'id', 'revision', 'action'}:
+    if not isinstance(request, dict) or set(request) not in ({'id', 'revision', 'action'}, {'id', 'revision', 'action', 'context_token'}):
         raise ValueError('Request requires id, revision, action')
     if not isinstance(request['id'], str) or not re.fullmatch(r'[a-zA-Z0-9_-]{8,80}', request['id']):
         raise ValueError('Invalid action id')
+    if 'context_token' in request and (not isinstance(request['context_token'],str) or not re.fullmatch(r'[0-9a-f]{64}',request['context_token'])):
+        raise ValueError('Invalid command context token')
     revision = request['revision']
     if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
         raise ValueError('Invalid revision')
@@ -93,10 +100,13 @@ class ActionGateway:
             receipt['paper_interrupt_atomic'] = True
         state.setdefault('control_receipts', {})[request['id']] = receipt
         state['control_revision'] = revision + 1
+        reservation_started = time.perf_counter()
         self.controller.save('control_action_reserved')
+        reservation_ms = (time.perf_counter()-reservation_started)*1000
         self.controller._active_control_id=request['id']
         started = time.perf_counter()
         error_type = None
+        guard_evidence = {}
         if self.diagnostics:self.diagnostics.action('action_reserved', request, status='UNKNOWN', revision=revision+1)
         try:
             # Recheck after reservation, immediately before effects. Existing
@@ -107,6 +117,7 @@ class ActionGateway:
         except ActionRejected as exc:
             status = 'REJECTED'
             error_type = type(exc).__name__
+            if isinstance(exc, SnapshotStale):guard_evidence=exc.evidence
             if exc.public_message is not None:receipt['reason']=str(exc.public_message)[:400]
         except (ValueError, OSError, TimeoutError) as exc:
             status = 'UNKNOWN'
@@ -119,7 +130,7 @@ class ActionGateway:
         receipt = self.controller.state['control_receipts'][request['id']]
         receipt['status'] = status
         self.controller.save('control_action_completed')
-        if self.diagnostics:self.diagnostics.action('action_completed', request, status=status, revision=receipt['revision'], error_type=error_type, duration_ms=round((time.perf_counter()-started)*1000,3))
+        if self.diagnostics:self.diagnostics.action('action_completed', request, status=status, revision=receipt['revision'], error_type=error_type, reservation_ms=round(reservation_ms,3), duration_ms=round((time.perf_counter()-started)*1000,3), **guard_evidence)
         return deepcopy(receipt)
 
 
@@ -130,9 +141,13 @@ class OwnerMailbox:
     retain their original behavior; neither HTTP workers nor this projection read
     MT5, SQLite or mutable controller state.
     """
-    def __init__(self, capacity=32, *, monotonic=time.monotonic, max_age_seconds=None):
+    def __init__(self, capacity=32, *, monotonic=time.monotonic, max_age_seconds=None, current_execution_view=None, max_queue_age_seconds=3):
         if max_age_seconds is not None and (self._nonnegative(max_age_seconds) is None or max_age_seconds <= 0):
             raise ValueError('Snapshot age limit must be finite and positive')
+        if current_execution_view is not None and (not callable(current_execution_view) or max_age_seconds is None or self._nonnegative(max_queue_age_seconds) is None or max_queue_age_seconds <= 0):
+            raise ValueError('Current execution evidence requires bounded freshness and queue age')
+        self.current_execution_view = current_execution_view
+        self.max_queue_age_seconds = max_queue_age_seconds
         self.requests = queue.Queue(maxsize=capacity)
         self.lock = threading.Lock()
         self._view = {'status': 'STARTING'}
@@ -187,16 +202,17 @@ class OwnerMailbox:
         return self._aged_view(evidence, self._published_at, now)
 
     @staticmethod
-    def _require_fresh(action, view):
+    def _require_fresh(action, view, *, stage=None, queue_age=None):
         # These exact commands stop new exposure or recheck time. They do not
         # authorize a new entry, quote-based close, resume, edit or settlement.
         if action in ({'type': 'command', 'text': '/stop'}, {'type': 'command', 'text': '/resume_time'}):
             return
+        evidence=dict(stage=stage, snapshot_age=view.get('snapshot_freshness',{}).get('age_seconds'), quote_age=(view.get('feed') or {}).get('age_seconds'), queue_age=queue_age)
         if not view.get('snapshot_freshness', {}).get('fresh'):
-            raise SnapshotStale('SNAPSHOT_STALE')
+            raise SnapshotStale('SNAPSHOT_STALE', **evidence)
         feed = view.get('feed') or {}
         if feed.get('status') != 'FRESH' or feed.get('timestamp_semantics') != 'VERIFIED':
-            raise SnapshotStale('FEED_STALE')
+            raise SnapshotStale('FEED_STALE', **evidence)
 
     def submit(self, request):
         request = validate_request(request)
@@ -210,9 +226,12 @@ class OwnerMailbox:
                     # Return a known durable result without enqueuing work. In
                     # particular an UNKNOWN receipt is never permission to retry.
                     return dict(id=request['id'], **{k: previous[k] for k in ('status', 'revision')})
-                self._require_fresh(request['action'], self._guard_view(self.monotonic()))
+                if ('context_token' in request and request['context_token'] != self._view.get('command_context_token')
+                        and request['action'] not in ({'type':'command','text':'/stop'}, {'type':'command','text':'/resume_time'})):
+                    raise SnapshotStale('CONTEXT_CHANGED', stage='submit')
+                self._require_fresh(request['action'], self._guard_view(self.monotonic()), stage='submit')
                 feed = self._view.get('feed') or {}
-                preview = (self._published_at, {'feed': {key: deepcopy(feed.get(key)) for key in ('status', 'timestamp_semantics', 'age_seconds', 'reason')}})
+                preview = (self._published_at, {'feed': {key: deepcopy(feed.get(key)) for key in ('status', 'timestamp_semantics', 'age_seconds', 'reason')}}, self.monotonic(), self._command_context(self._view) if self.current_execution_view is not None and 'context_token' in request else None)
             self.requests.put_nowait((request, preview))
         return {'id': request['id'], 'status': 'QUEUED'}
 
@@ -220,14 +239,66 @@ class OwnerMailbox:
         with self.lock:
             return self._aged_view(self._view, self._published_at, self.monotonic())
 
+    @staticmethod
+    def _command_context(view):
+        # Exclude changing quotes/PnL, never confirmed settings or obligations.
+        # Revision is validated by ActionGateway before durable reservation.
+        keys = ('scope','cycle_id','phase','stopped','settings','active_settings',
+                'tp_distances','recovery_mode','v3_settings','recovery_profiles',
+                'selected_recovery_profile','v3_request','v3_link','manual_reason',
+                'migration_block','time_block','read_only','edit','manual_close')
+        result = {key: deepcopy(view.get(key)) for key in keys}
+        for key in ('positions','orders'):
+            result[key] = sorted(({field: deepcopy(item.get(field)) for field in
+                                  ('id','side','volume','size','entry','price','status','command_id','sl','tp')}
+                                  for item in view.get(key, [])), key=lambda item: str(item['id']))
+        return result
+
+    @classmethod
+    def _context_token(cls, view):
+        return hashlib.sha256(json.dumps(cls._command_context(view),sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
     def _guard_execution(self, action, preview):
+        published_at, view, queued_at, context = preview
+        now = self.monotonic()
+        queue_age = self._nonnegative(now-queued_at)
+        if self.current_execution_view is not None and context is not None:
+            if action in ({'type':'command','text':'/stop'}, {'type':'command','text':'/resume_time'}):
+                return
+            if queue_age is None or queue_age >= self.max_queue_age_seconds:
+                raise SnapshotStale('QUEUE_EXPIRED', stage='execution_queue', queue_age=queue_age)
+            # Owner-only callback: never called by HTTP workers. Fresh current
+            # evidence replaces only publication age, not reviewed context.
+            current = self.current_execution_view()
+            evidence_at = self.monotonic()
+            self._require_fresh(action, current, stage='execution_current', queue_age=queue_age)
+            if self._command_context(current) != context:
+                raise SnapshotStale('CONTEXT_CHANGED', stage='execution_context', queue_age=queue_age,
+                                    snapshot_age=current.get('snapshot_freshness',{}).get('age_seconds'),
+                                    quote_age=(current.get('feed') or {}).get('age_seconds'))
+            # Context projection may itself take time. Recheck all deadlines
+            # after that work, immediately before permitting execution.
+            checked_at = self.monotonic()
+            queue_age = self._nonnegative(checked_at-queued_at)
+            if queue_age is None or queue_age >= self.max_queue_age_seconds:
+                raise SnapshotStale('QUEUE_EXPIRED', stage='execution_queue', queue_age=queue_age)
+            elapsed = self._nonnegative(checked_at-evidence_at)
+            freshness = current.get('snapshot_freshness') or {}
+            base_age = self._nonnegative(freshness.get('age_seconds'))
+            age = base_age+elapsed if base_age is not None and elapsed is not None else None
+            freshness.update(age_seconds=age, fresh=bool(freshness.get('fresh') and age is not None and age <= self.max_age_seconds))
+            current['snapshot_freshness'] = freshness
+            feed = current.get('feed') or {}
+            base_quote_age = self._finite(feed.get('age_seconds'))
+            quote_age = base_quote_age+elapsed if base_quote_age is not None and elapsed is not None else None
+            feed['age_seconds'] = quote_age
+            if quote_age is None or not -2 <= quote_age <= 5:feed['status']='WAITING'
+            current['feed'] = feed
+            self._require_fresh(action, current, stage='execution_current', queue_age=queue_age)
+            return
         with self.lock:
-            now = self.monotonic()
-            # Keep the original preview deadline even if an earlier drain has
-            # published a newer snapshot while this request remained queued.
-            published_at, view = preview
-            self._require_fresh(action, self._aged_view(view, published_at, now))
-            self._require_fresh(action, self._guard_view(now))
+            self._require_fresh(action, self._aged_view(view, published_at, now), stage='execution_preview', queue_age=queue_age)
+            self._require_fresh(action, self._guard_view(now), stage='execution_published', queue_age=queue_age)
 
     def drain(self, gateway, view_factory, limit=8):
         if threading.get_ident() != gateway.owner:
@@ -254,6 +325,8 @@ class OwnerMailbox:
             self.outcomes.pop(next(iter(self.outcomes)))
         projection_started = self.monotonic()
         view = deepcopy(view_factory())
+        if self.current_execution_view is not None:
+            view['command_context_token'] = self._context_token(view)
         durable = deepcopy(view.get('action_results', {}))
         # A conflicting reuse must not erase an existing UNKNOWN receipt.
         published = deepcopy(self.outcomes)

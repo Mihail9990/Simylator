@@ -132,7 +132,7 @@ class PaperSession:
         self.controller=ControlledRecoveryController(self.store,self.exchange,clock=clock,monotonic=monotonic)
         from .paper_interrupt import recover_receipts
         recover_receipts(self)
-        self.scope=self.exchange.account;self.gateway=ActionGateway(self.controller,execute=self.action);self.mailbox=OwnerMailbox(monotonic=monotonic,max_age_seconds=2);self.snapshot=None
+        self.scope=self.exchange.account;self.gateway=ActionGateway(self.controller,execute=self.action);self.mailbox=OwnerMailbox(monotonic=monotonic,max_age_seconds=2,current_execution_view=self._execution_view,max_queue_age_seconds=3);self._execution_started=None;self._execution_ok=False;self.snapshot=None
         self.presentation=None
         from .detailed_diagnostics import DetailedDiagnostics
         self.diagnostics=DetailedDiagnostics(clock)
@@ -184,7 +184,25 @@ class PaperSession:
         if self.exchange.p['paused_gap'] and a!=dict(type='command',text='/stop'):raise ActionRejected('После перерыва подтвердите продолжение симуляции без восстановления пропущенных тиков')
         if a!=dict(type='command',text='/stop'):self._fresh()
         return self.controller.action(a)
+    def _execution_view(self):
+        projection_started = self.mailbox.monotonic()
+        view = self.view()
+        now = self.mailbox.monotonic()
+        age = self.mailbox._nonnegative(now-self._execution_started) if self._execution_started is not None else None
+        valid = self._execution_ok and self.exchange.available and age is not None and age <= 2
+        view['snapshot_freshness'] = dict(fresh=valid, age_seconds=age, max_age_seconds=2)
+        feed = view.get('feed') or {}
+        quote_age = self.mailbox._finite(feed.get('age_seconds'))
+        projection_age = self.mailbox._nonnegative(now-projection_started)
+        quote_age = quote_age+projection_age if quote_age is not None and projection_age is not None else None
+        feed['age_seconds'] = quote_age
+        if quote_age is None or not -2 <= quote_age <= 5:
+            feed['status'] = 'WAITING'
+        return view
+
     def step(self):
+        self._execution_started=self.mailbox.monotonic();self._execution_ok=False
+        had_requests=not self.mailbox.requests.empty()
         started=time.perf_counter(); marks={}; error_type=None
         try:
             before=time.perf_counter(); market=self.reader.read(); marks['read_ms']=(time.perf_counter()-before)*1000
@@ -193,13 +211,14 @@ class PaperSession:
             if not self.exchange.p['paused_gap']:self.controller.tick()
             marks['tick_ms']=(time.perf_counter()-before)*1000
             self.snapshot=self.exchange.snapshot()
+            self._execution_ok=True
         except DurabilityError:raise
         except Exception as exc:
             error_type=type(exc).__name__;self.exchange.available=False;self.reader.reason=self.reader.reason or 'WAIT_FRESH_MT5'
         before=time.perf_counter(); self.mailbox.drain(self.gateway,self.view); marks['publish_ms']=(time.perf_counter()-before)*1000
         now=time.perf_counter()
         # Heartbeat rather than a raw quote stream; failures are always observed.
-        if error_type or now-self._diagnostic_last_step>=10:
+        if error_type or had_requests or now-started>=1 or now-self._diagnostic_last_step>=10:
             self._diagnostic_last_step=now
             self.diagnostics.record('owner_step', status='UNAVAILABLE' if error_type else 'OK', error_type=error_type,
                 duration_ms=round((now-started)*1000,3), queue_depth=self.mailbox.requests.qsize(),
