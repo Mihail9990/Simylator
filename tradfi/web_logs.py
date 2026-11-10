@@ -8,6 +8,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from .context_diagnostics import project,VERSION,BASE
 from .log_export import build_document,EVENTS,PHASES
+from .detailed_diagnostics import sanitize as sanitize_detail
 
 LIMIT=1024*1024
 PAGE=16000
@@ -16,16 +17,20 @@ STATUS={'UNKNOWN','APPLIED','REJECTED','CONFLICT','OBSERVED','ACKNOWLEDGED','NOT
 class DiagnosticLogs:
     def __init__(self,runtime_path=None):
         self.runtime_path=runtime_path;self.lock=threading.Lock();self.documents={};self.signatures={};self.handlers={};self.recent={}
-    def capture(self,scope,store,state,now,view=None):
+    def capture(self,scope,store,state,now,view=None,details=None):
         stamp=datetime.fromtimestamp(now,timezone.utc).isoformat()
         # Only changes in decisions/state create records; quotes are context,
         # never a perpetual raw tick feed. Repeated unchanged snapshots are skipped.
         context=project(dict(view or {},settings=state.get('basket_settings',{}),phase=state.get('phase'),cycle_id=(state.get('cycle') or {}).get('id'),recovery=(state.get('cycle') or {}).get('recovery'),commands=list(state.get('commands',{}).values())[-20:]))
-        stable=dict(context);stable.pop('quote',None)
+        stable=dict(context);stable.pop('quote',None);stable.pop('metrics',None);stable.pop('projection',None)
+        if isinstance(stable.get('paper'),dict):stable['paper']={k:v for k,v in stable['paper'].items() if k!='cursor'}
+        if isinstance(stable.get('feed'),dict):stable['feed']={k:v for k,v in stable['feed'].items() if k in {'status','reason','source'}}
         signature=json.dumps(stable,sort_keys=True)
-        if self.signatures.get(scope)!=signature:
+        safe_details=[sanitize_detail(row) for row in (details or [])[-200:]]
+        safe_details=[row for row in safe_details if row]
+        if self.signatures.get(scope)!=signature or safe_details:
             self.signatures[scope]=signature
-            record=dict(version=VERSION,base_commit=BASE,scope=scope,observed_utc=stamp,server_display_utc_plus_2=datetime.fromtimestamp(now,timezone(timedelta(hours=2))).isoformat(),context=context)
+            record=dict(version=VERSION,base_commit=BASE,scope=scope,observed_utc=stamp,server_display_utc_plus_2=datetime.fromtimestamp(now,timezone(timedelta(hours=2))).isoformat(),context=context,diagnostics=safe_details)
             self.recent.setdefault(scope,[]).append(record);self.recent[scope]=self.recent[scope][-100:]
             if self.runtime_path:
                 try:
@@ -38,7 +43,7 @@ class DiagnosticLogs:
         for seq,event,payload in store.db.execute('SELECT seq,event,payload FROM audit ORDER BY seq DESC LIMIT 200').fetchall()[::-1]:
             name=event.split(':',1)[0]
             if name not in EVENTS:continue
-            data=json.loads(payload);rows.append(json.dumps(dict(audit_seq=seq,event=name,phase=data.get('phase') if data.get('phase') in PHASES else 'OTHER',event_utc=None),ensure_ascii=False))
+            data=json.loads(payload);rows.append(json.dumps(dict(audit_seq=seq,event=name,phase=data.get('phase') if data.get('phase') in PHASES else 'OTHER',event_utc=None,detail=project(data)),ensure_ascii=False))
         for item in state.get('recovery_writeoffs',[])[-100:]:
             try:
                 from .settings import number
@@ -51,7 +56,7 @@ class DiagnosticLogs:
         rows.extend(json.dumps(r,ensure_ascii=False) for r in reversed(self.recent.get(scope,[])))
         header=f'Manifest: version={VERSION}; base={BASE}; scope={scope}; max_export_bytes={LIMIT}; recent_snapshots=100; audit_tail=200; raw_messages/secrets/headers/credentials/account_ids omitted.\nЛоги: {scope}. Снимок UTC: {stamp}\nВремя сервера: UTC+2 только отображение, не сдвиг epoch. Старые audit без event_utc не датируются задним числом.\nОграниченная диагностическая проекция; секреты, счета и произвольные сообщения не экспортируются.\n'
         text=header+'\n'.join(rows)
-        with self.lock:self.documents[scope]=text.encode('utf-8')[-LIMIT:].decode('utf-8',errors='replace')
+        with self.lock:self.documents[scope]=text.encode('utf-8')[-LIMIT:].decode('utf-8',errors='ignore')
     def document(self,scope):
         if scope=='runtime':
             if not self.runtime_path:return 'Лог-файл не настроен.\n'
@@ -71,20 +76,20 @@ class DiagnosticLogs:
                         if len(line)>65536:continue
                         try:r=json.loads(line)
                         except (ValueError,UnicodeError):continue
-                        if not isinstance(r,dict) or r.get('scope')!=scope or r.get('version') not in {VERSION,'demo-diagnostics-v1'}:continue
-                        safe={'scope':scope,'version':VERSION,'context':project(r.get('context',{}))}
+                        if not isinstance(r,dict) or r.get('scope')!=scope or not isinstance(r.get('version'),str) or r.get('version') not in {VERSION,'panel-diagnostics-v1','demo-diagnostics-v1'}:continue
+                        safe={'scope':scope,'version':VERSION,'context':project(r.get('context',{})), 'diagnostics':[sanitize_detail(item) for item in r.get('diagnostics',[])[:200] if isinstance(item,dict)] if isinstance(r.get('diagnostics'),list) else []}
                         for key in ('observed_utc','server_display_utc_plus_2'):
                             if isinstance(r.get(key),str) and re.fullmatch(r'[0-9T:.+Z-]{20,40}',r[key]):safe[key]=r[key]
                         archived.append(json.dumps(safe,ensure_ascii=False))
                 except OSError:continue
         combined=text+'\nСохранённые контекстные записи (возможны повторы текущего снимка; ограниченные хвосты 4 × 128 KiB):\n'+'\n'.join(archived)
         raw=combined.encode('utf-8');cut=len(raw)>LIMIT-256
-        if cut:combined=raw[-(LIMIT-512):].decode('utf-8',errors='replace')
+        if cut:combined=raw[-(LIMIT-512):].decode('utf-8',errors='ignore')
         return f'Manifest version={VERSION}; scope={scope}; max_bytes={LIMIT}; truncated={cut}; secrets/raw_comments omitted; UTC+2 display only.\n'+combined
     def close(self):
         for h in self.handlers.values():h.close()
     def response(self,scope,page=0,download=False):
         text=self.document(scope)
-        if download:return text.encode('utf-8')[:LIMIT]
+        if download:return text.encode('utf-8')[:LIMIT].decode('utf-8',errors='ignore').encode('utf-8')
         if type(page) is not int or not 0<=page<=100:raise ValueError('Invalid page')
         return dict(scope=scope,page=page,text=text[page*PAGE:(page+1)*PAGE],has_more=(page+1)*PAGE<len(text),bounded=True)

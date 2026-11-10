@@ -32,6 +32,7 @@ class WebTransport:
         if urlsplit('http://' + authority).hostname not in {'127.0.0.1', '::1'}:
             raise ValueError('Web server must bind loopback')
         self.logs = logs
+        self.diagnostics = None
         if role != 'paper':
             raise ValueError('Invalid panel role')
         self._role = role
@@ -60,6 +61,8 @@ class WebTransport:
         origin = self.origin
 
         def reply(code, value, cookie=None):
+            if code >= 400 and self.diagnostics is not None:
+                self.diagnostics.record('transport_rejected', error_code=value.get('error'), http_status=code)
             return (code, value, {'Set-Cookie': cookie} if cookie else {})
         if headers.get('host') != self.authority or headers.get('origin', origin) != origin:
             return reply(403, {'error': 'ORIGIN_DENIED'})
@@ -116,7 +119,7 @@ class WebTransport:
                     raise ValueError()
                 value = self.logs.response(scope, page, download=route.endswith('/download'))
                 if isinstance(value, bytes):
-                    return (200, value, {'Content-Disposition': 'attachment; filename="tradfi-' + scope + '-logs.txt"'})
+                    return (200, value, {'Content-Type': 'text/plain; charset=utf-8', 'Content-Disposition': 'attachment; filename="tradfi-' + scope + '-logs.txt"'})
                 return reply(200, value)
             except ValueError:
                 return reply(400, {'error': 'INVALID_LOG_REQUEST'})
@@ -265,11 +268,12 @@ class PaperPanel:
         self.server = None
         self.logs = DiagnosticLogs(getattr(paper_session, 'log_file', None))
         self.transport = WebTransport(self.mailbox, authority=authority, password=password, clock=monotonic, public_origin=public_origin, role='paper', logs=self.logs)
+        self.transport.diagnostics = paper_session.diagnostics
 
     def view(self):
         return self.paper_session.view()
 
     def step(self):
-        self.logs.capture('paper', self.controller.store, self.controller.state, self.clock(), self.view())
+        self.logs.capture('paper', self.controller.store, self.controller.state, self.clock(), self.mailbox.view(), self.paper_session.diagnostics.drain())
     start = PaperPresentation.start
     close = PaperPresentation.close

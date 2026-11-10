@@ -1,7 +1,7 @@
 """Persistent paper exchange. Receives immutable market facts, never an MT5 object."""
 from copy import deepcopy
 from decimal import Decimal as D
-import hashlib,json,uuid
+import hashlib,json,uuid,time
 from .recovery_v3 import ControlledRecoveryController
 from .control import ActionRejected,ActionGateway,OwnerMailbox
 from .broker import Spec
@@ -134,6 +134,10 @@ class PaperSession:
         recover_receipts(self)
         self.scope=self.exchange.account;self.gateway=ActionGateway(self.controller,execute=self.action);self.mailbox=OwnerMailbox(monotonic=monotonic,max_age_seconds=2);self.snapshot=None
         self.presentation=None
+        from .detailed_diagnostics import DetailedDiagnostics
+        self.diagnostics=DetailedDiagnostics(clock)
+        self.gateway.diagnostics=self.diagnostics
+        self._diagnostic_last_step=0
     def _fresh(self):
         try:return self.exchange.snapshot()
         except OSError as exc:raise ActionRejected('Ожидание данных MT5',public_message='Ожидаются проверенные свежие котировки MT5; бумажное действие не выполнено.') from exc
@@ -181,13 +185,26 @@ class PaperSession:
         if a!=dict(type='command',text='/stop'):self._fresh()
         return self.controller.action(a)
     def step(self):
+        started=time.perf_counter(); marks={}; error_type=None
         try:
-            market=self.reader.read();self.exchange.observe(market)
+            before=time.perf_counter(); market=self.reader.read(); marks['read_ms']=(time.perf_counter()-before)*1000
+            before=time.perf_counter(); self.exchange.observe(market); marks['observe_ms']=(time.perf_counter()-before)*1000
+            before=time.perf_counter()
             if not self.exchange.p['paused_gap']:self.controller.tick()
+            marks['tick_ms']=(time.perf_counter()-before)*1000
             self.snapshot=self.exchange.snapshot()
         except DurabilityError:raise
-        except Exception:self.exchange.available=False;self.reader.reason=self.reader.reason or 'WAIT_FRESH_MT5'
-        self.mailbox.drain(self.gateway,self.view)
+        except Exception as exc:
+            error_type=type(exc).__name__;self.exchange.available=False;self.reader.reason=self.reader.reason or 'WAIT_FRESH_MT5'
+        before=time.perf_counter(); self.mailbox.drain(self.gateway,self.view); marks['publish_ms']=(time.perf_counter()-before)*1000
+        now=time.perf_counter()
+        # Heartbeat rather than a raw quote stream; failures are always observed.
+        if error_type or now-self._diagnostic_last_step>=10:
+            self._diagnostic_last_step=now
+            self.diagnostics.record('owner_step', status='UNAVAILABLE' if error_type else 'OK', error_type=error_type,
+                duration_ms=round((now-started)*1000,3), queue_depth=self.mailbox.requests.qsize(),
+                positions_count=len(self.exchange.p['positions']), orders_count=len(self.exchange.p['orders']),
+                **{k:round(v,3) for k,v in marks.items()})
     def view(self):
         from .web_control import PaperPresentation
         if self.presentation is None:

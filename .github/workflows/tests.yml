@@ -20,6 +20,8 @@ jobs:
       - run: node tools/test_arrow_drawers_unit.js
       - run: node tools/test_protection_drag_unit.js
       - run: node tools/test_pending_writeoff_unit.js
+      - run: node tools/test_confirmed_start_unit.js
+      - run: node tools/test_log_download_unit.js
       - run: node tools/test_snapshot_freshness_unit.js
       - run: node tools/test_profile_quote_unit.js
       - run: node tools/test_paper_interrupt_unit.js

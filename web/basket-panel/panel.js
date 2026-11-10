@@ -6,7 +6,7 @@
  const storageKey=k=>'basket-'+k+(mode==='paper'?'-paper':'');
  const apiPath=kind=>'/api/'+(mode==='paper'?'paper/':'')+kind;
  let view=null,pending=localStorage.getItem(storageKey('request')),pendingScope=localStorage.getItem(storageKey('scope')),busy=false,polling=false,loadedScope=null,preview=null,lines=[],zoom=1,pan=0,gesture=null,hold=null,timeOffset=0,visibleCount=60,previewFocus=null,previewWasOpen=false;
- let lastActionReceipt=null;
+ let lastActionReceipt=null,pollTask=null,confirmingCommand=false;
  const names={INITIAL_SIZE:'Объём начальной позиции',INITIAL_ENTRY_DISTANCE:'STOP от Close M1',INITIAL_SL_DISTANCE:'Начальный SL',INITIAL_TP_DISTANCE:'Начальный TP',BASKET_COUNT:'Число билетов корзины',TICKET_SIZE:'Объём одного билета',RECOVERY_SL_DISTANCE:'Фиксированный SL корзины',COST_RESERVE:'Резерв будущих расходов, валюта счёта',TP_STEP_MULTIPLIER:'Множитель шага TP (не меньше 1)',CYCLE_COOLDOWN_SECONDS:'Пауза после цикла, секунды'};
  const headers=()=>({'X-Local-Control':'1','X-Controller-Scope':view?.scope??''});
  function notice(id,text,tone='info'){const el=$(id);el.textContent=text;el.dataset.tone=tone;}
@@ -34,7 +34,31 @@
    const receipt=await r.json();lastActionReceipt={status:receipt.status,reason:receipt.reason};if(['APPLIED','REJECTED','CONFLICT'].includes(receipt.status))clearPending();if(preview&&receipt.status!=='APPLIED')$('preview-error').textContent=actionReceiptText(receipt.status,receipt.reason);
   }finally{busy=false;await poll();updateBotActivity();}
  }
- async function command(text,message){if(!confirm(message))return;try{await send({type:'command',text});}catch(e){error(e.message);}}
+ function commandContext(v){
+  // Exclude moving quotes/PnL, but preserve every decision/settings/obligation
+  // shown before confirmation. Never silently rebase the confirmed revision.
+  const keys=['scope','revision','cycle_id','phase','stopped','settings','active_settings','tp_distances','recovery_mode','v3_settings','recovery_profiles','selected_recovery_profile','v3_request','v3_link','manual_reason','migration_block','time_block','read_only'];
+  const stable=x=>Array.isArray(x)?x.map(stable):x&&typeof x==='object'?Object.fromEntries(Object.keys(x).sort().map(k=>[k,stable(x[k])])):x;
+  return JSON.stringify(stable(Object.fromEntries([...keys.map(k=>[k,v?.[k]]),...['positions','orders'].map(k=>[k,(v?.[k]??[]).map(x=>({id:x.id,side:x.side,volume:x.volume,size:x.size,entry:x.entry,price:x.price,status:x.status,command_id:x.command_id,sl:x.sl,tp:x.tp})).sort((a,b)=>String(a.id).localeCompare(String(b.id)))])])));
+ }
+ async function command(text,message){
+  if(confirmingCommand)return;
+  confirmingCommand=true;
+  try{
+   if(!view)throw Error('Нет снимка. Команда не отправлена.');
+   if(busy||pending)throw Error('Предыдущий исход не сверён. Повтор запрещён.');
+   const revision=view.revision,scope=view.scope,context=commandContext(view);
+   if(!confirm(message))return;
+   if(!['/stop','/resume_time'].includes(text)){
+    // A modal pauses polling. Await any old request, then require a new GET.
+    if(polling)await pollTask;
+    await poll();
+    if(!snapshotCurrent()||!quoteCurrent())throw Error('Нет свежего снимка или котировки. Команда не отправлена.');
+    if(commandContext(view)!==context)throw Error('Состояние или параметры изменились. Проверьте данные и подтвердите команду заново.');
+   }
+   await send({type:'command',text},revision,scope);
+  }catch(e){error(e.message);}finally{confirmingCommand=false;}
+ }
  const keyboard=$('cycle-keyboard');
  try{keyboard.open=localStorage.getItem('cycle-keyboard-open')!=='false';}catch{}
  keyboard.addEventListener('toggle',()=>{try{localStorage.setItem('cycle-keyboard-open',String(keyboard.open));}catch{}});
@@ -429,7 +453,7 @@
   $('reverse-enable').title=view.reverse_controls?.reason??'';$('reverse-disable').title=view.reverse_controls?.reason??'';
   if(loadedScope!==view.scope){fields();loadedScope=view.scope;}v3Render();draw();
  }
- async function poll(){if(polling||busy)return;polling=true;const started=performance.now();try{const r=await fetch(apiPath('state'),{headers:headers(),signal:AbortSignal.timeout(2500)});if(!r.ok){if([401,403].includes(r.status)){$('login').hidden=false;$('workspace').hidden=true;}throw Error('Нет авторизованного снимка');}const v=await r.json();if(v.contract!=='ticket_basket_v1'||(mode==='paper'?v.mode!=='PAPER':v.mode==='PAPER'))throw Error('Несовместимая версия контроллера');view=v;acceptSnapshotFreshness(v,started);const status=pending&&pendingScope===v.scope?v.action_results[pending]?.status:null;if(['APPLIED','REJECTED','CONFLICT'].includes(status)){lastActionReceipt={status,reason:v.action_results[pending]?.reason};clearPending();}$('login').hidden=true;$('workspace').hidden=false;render();}catch(e){v3Fresh=false;if(view){v3Render();connectionLabel();updateBotActivity();$('paper-interrupt').disabled=true;}$('feed-status').textContent='Нет свежего снимка';}finally{polling=false;}}
+ async function poll(){if(polling||busy)return;polling=true;pollTask=(async()=>{const started=performance.now();try{const r=await fetch(apiPath('state'),{headers:headers(),signal:AbortSignal.timeout(2500)});if(!r.ok){if([401,403].includes(r.status)){$('login').hidden=false;$('workspace').hidden=true;}throw Error('Нет авторизованного снимка');}const v=await r.json();if(v.contract!=='ticket_basket_v1'||(mode==='paper'?v.mode!=='PAPER':v.mode==='PAPER'))throw Error('Несовместимая версия контроллера');view=v;acceptSnapshotFreshness(v,started);const status=pending&&pendingScope===v.scope?v.action_results[pending]?.status:null;if(['APPLIED','REJECTED','CONFLICT'].includes(status)){lastActionReceipt={status,reason:v.action_results[pending]?.reason};clearPending();}$('login').hidden=true;$('workspace').hidden=false;render();}catch(e){v3Fresh=false;if(view){v3Render();connectionLabel();updateBotActivity();$('paper-interrupt').disabled=true;}$('feed-status').textContent='Нет свежего снимка';}finally{polling=false;}})();return pollTask;}
  const defaultPrefs={mainTrend:false,mainCycle:true,pane:null,pattern:{trend:false,cycle:true},figure:{trend:false,cycle:true},liquidity:false,opacity:20,colors:{BUY:'#26a69a',SELL:'#ef5350',sl:'#ef5350',tp:'#26a69a',entry:'#e0b565',up:'#26a69a',down:'#ef5350',grid:'#25282e',zone:'#e0b565'}};
  let prefs=structuredClone(defaultPrefs);try{const saved=JSON.parse(localStorage.getItem('chart-preferences-v1')??'null');if(saved){for(const k of ['mainTrend','mainCycle','liquidity'])if(typeof saved[k]==='boolean')prefs[k]=saved[k];if(['pattern','figure',null].includes(saved.pane))prefs.pane=saved.pane;for(const pane of ['pattern','figure'])for(const k of ['trend','cycle'])if(typeof saved[pane]?.[k]==='boolean')prefs[pane][k]=saved[pane][k];if(Number.isFinite(saved.opacity))prefs.opacity=Math.max(0,Math.min(100,saved.opacity));for(const k of Object.keys(prefs.colors))if(/^#[0-9a-f]{6}$/i.test(saved.colors?.[k]))prefs.colors[k]=saved.colors[k];}}catch{}
  const savePrefs=()=>{localStorage.setItem('chart-preferences-v1',JSON.stringify(prefs));layout();draw();};
@@ -458,7 +482,7 @@
  let logPage=0;
  async function showLogs(){const scope=$('log-scope').value;try{const r=await fetch('/api/logs?scope='+encodeURIComponent(scope)+'&page='+logPage,{headers:{'X-Local-Control':'1'},signal:AbortSignal.timeout(4000)});if(!r.ok)throw Error('Логи недоступны: '+r.status);const v=await r.json();if(scope!==$('log-scope').value)return;$('logs-view').textContent=v.text;$('logs-status').textContent='Страница '+(v.page+1)+' · ограниченная выгрузка';$('logs-prev').disabled=v.page===0;$('logs-next').disabled=!v.has_more;}catch(e){$('logs-status').textContent=e.message;}}
  $('logs-refresh').onclick=()=>{logPage=0;showLogs();};$('log-scope').onchange=()=>{logPage=0;showLogs();};$('logs-prev').onclick=()=>{logPage=Math.max(0,logPage-1);showLogs();};$('logs-next').onclick=()=>{logPage++;showLogs();};
- $('logs-download').onclick=async()=>{const scope=$('log-scope').value;try{const r=await fetch('/api/logs/download?scope='+encodeURIComponent(scope),{headers:{'X-Local-Control':'1'},signal:AbortSignal.timeout(5000)});if(!r.ok)throw Error('Скачивание отклонено: '+r.status);const blob=await r.blob();if(blob.size>1048576)throw Error('Файл превысил лимит');const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='tradfi-'+scope+'-logs.txt';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);$('logs-status').textContent='Подготовлен файл UTF-8: '+a.download;}catch(e){$('logs-status').textContent=e.message;}};
+ $('logs-download').onclick=async()=>{const scope=$('log-scope').value;try{const r=await fetch('/api/logs/download?scope='+encodeURIComponent(scope),{headers:{'X-Local-Control':'1'},signal:AbortSignal.timeout(5000)});if(!r.ok)throw Error('Скачивание отклонено: '+r.status);if(!/^text\/plain\s*;\s*charset=utf-8$/i.test(r.headers.get('Content-Type')??''))throw Error('Ответ не является TXT UTF-8. Файл не сохранён.');const blob=await r.blob();if(blob.size>1048576)throw Error('Файл превысил лимит');const content=(await blob.text()).trimStart();if(/^(?:<|\{|\[)/.test(content))throw Error('Получена страница или JSON вместо лога. Файл не сохранён.');const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='tradfi-'+scope+'-logs.txt';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);$('logs-status').textContent='Подготовлен файл UTF-8: '+a.download;}catch(e){$('logs-status').textContent=e.message;}};
  // Local display preference only; each controller role has its own storage key.
  const chartHeightKey=storageKey('chart-height-v1');
  function normalizeChartHeight(value){

@@ -59,6 +59,7 @@ class ActionGateway:
         self.controller = controller
         self.owner = threading.get_ident()
         self.execute = execute or self._execute
+        self.diagnostics = None
 
     def _execute(self, action):
         if set(action) != {'type', 'text'} or action['type'] != 'command' or not isinstance(action['text'], str):
@@ -77,10 +78,13 @@ class ActionGateway:
         previous = receipts.get(request['id'])
         if previous:
             if previous['digest'] != digest:
+                if self.diagnostics:self.diagnostics.action('action_conflict', request, status='CONFLICT')
                 raise Conflict('Action id reused with different payload')
+            if self.diagnostics:self.diagnostics.action('action_replayed', request, status=previous['status'], revision=previous['revision'])
             return deepcopy(previous)
         revision = state.get('control_revision', 0)
         if request['revision'] != revision:
+            if self.diagnostics:self.diagnostics.action('action_conflict', request, status='CONFLICT', revision=revision)
             raise Conflict('State changed; refresh preview before Apply')
         receipt = dict(digest=digest, status='UNKNOWN', revision=revision+1)
         if request['action'].get('type') == 'paper_interrupt' and state.get('backend') == 'paper_mt5_quotes_v1':
@@ -91,6 +95,9 @@ class ActionGateway:
         state['control_revision'] = revision + 1
         self.controller.save('control_action_reserved')
         self.controller._active_control_id=request['id']
+        started = time.perf_counter()
+        error_type = None
+        if self.diagnostics:self.diagnostics.action('action_reserved', request, status='UNKNOWN', revision=revision+1)
         try:
             # Recheck after reservation, immediately before effects. Existing
             # receipts return above and can never be relabelled or replayed.
@@ -99,9 +106,11 @@ class ActionGateway:
             self.execute(deepcopy(request['action']))
         except ActionRejected as exc:
             status = 'REJECTED'
+            error_type = type(exc).__name__
             if exc.public_message is not None:receipt['reason']=str(exc.public_message)[:400]
-        except (ValueError, OSError, TimeoutError):
+        except (ValueError, OSError, TimeoutError) as exc:
             status = 'UNKNOWN'
+            error_type = type(exc).__name__
         else:
             status = 'APPLIED'
         finally:
@@ -110,6 +119,7 @@ class ActionGateway:
         receipt = self.controller.state['control_receipts'][request['id']]
         receipt['status'] = status
         self.controller.save('control_action_completed')
+        if self.diagnostics:self.diagnostics.action('action_completed', request, status=status, revision=receipt['revision'], error_type=error_type, duration_ms=round((time.perf_counter()-started)*1000,3))
         return deepcopy(receipt)
 
 
