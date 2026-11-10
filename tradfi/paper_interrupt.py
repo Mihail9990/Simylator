@@ -118,7 +118,8 @@ def interrupt_cycle(session, action):
     if session.reader.safety.check() or state.get('time_block'):
         reject('Время не подтверждено. Прерывание не выполнено; дождитесь проверенных свежих котировок.')
     snap = session._fresh()
-    if exchange.market.get('timestamp_semantics') != 'VERIFIED' or snap['account'] != state['account']:
+    market=exchange.p.get('last_verified_market') if exchange.command_baseline is not None else exchange.market
+    if not market or market.get('timestamp_semantics') != 'VERIFIED' or snap['account'] != state['account']:
         reject('Источник котировки или PAPER-счёт не подтверждён.')
     bid, ask = number(snap['quote']['bid']), number(snap['quote']['ask'])
     if bid <= 0 or ask < bid:
@@ -199,6 +200,14 @@ def interrupt_cycle(session, action):
     fresh = session._fresh()
     if fresh['quote'] != snap['quote'] or fresh['account'] != snap['account']:
         reject('Котировка изменилась во время проверки; подтвердите прерывание заново.')
+    if exchange.command_baseline is not None:
+        from .paper_commands import quote_info
+        used_quote=quote_info(exchange)
+        settlement['paper_quote']=deepcopy(used_quote)
+        old_deals={d['id'] for d in exchange.p['deals']}
+        for deal in planned.p['deals']:
+            if deal['id'] not in old_deals:deal['paper_quote']=deepcopy(used_quote)
+        updated['last_paper_interrupt']=deepcopy(settlement)
     _commit(session, expected, expected_exchange, updated, planned.p, settlement)
     # No fallible freshness/read step after the committed APPLIED receipt.
     session.snapshot = dict(snap, orders=[], positions=[], deals=deepcopy(exchange.p['deals']),

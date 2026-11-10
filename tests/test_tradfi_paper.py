@@ -123,11 +123,12 @@ class PaperTest(unittest.TestCase):
         with self.assertRaises(ActionRejected):self.action(dict(type='paper_resume'))
         self.assertEqual(self.session.controller.state['cycle']['manual_reason'],'CYCLE_24H_LIMIT')
         self.assertFalse(self.p['positions'])
-    def test_stale_start_is_rejected_without_locking_stop(self):
+    def test_stale_start_uses_last_verified_quote_without_automatic_entry(self):
         self.reader.reason='CLOSED_MARKET';self.step()
         gate=self.session.gateway
         first=gate.apply(dict(id='stale-start-001',revision=0,action=dict(type='command',text='/start')))
-        self.assertEqual(first['status'],'REJECTED')
+        self.assertEqual(first['status'],'APPLIED')
+        self.assertTrue(first['paper_quote']['stale']);self.assertFalse(self.p['orders'])
         self.assertEqual(gate.apply(dict(id='stop-after-stale',revision=1,action=dict(type='command',text='/stop')))['status'],'APPLIED')
     def test_active_sl_edit_confirmed_without_resizing_and_stale_preview_rejected(self):
         self.reversal();c=self.session.controller.state['cycle'];settings=dict(c['cfg'],RECOVERY_SL_DISTANCE='1.25',BASKET_COUNT=4)

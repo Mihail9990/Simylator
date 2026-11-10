@@ -27,7 +27,7 @@
   const safeRecovery=action.type==='command'&&['/stop','/resume_time'].includes(action.text);
   if(busy||pending)throw Error('Предыдущий исход не сверён. Повтор запрещён.');
   if(!view||scope!==view.scope)throw Error('Контекст изменился; обновите данные.');
-  if(!safeRecovery&&(!snapshotCurrent()||!quoteCurrent())){
+  if(!safeRecovery&&(!snapshotCurrent()||!commandQuoteReady(action))){
    // Confirmation dialogs can outlive the client snapshot. Refresh only reads,
    // keeping the exact reviewed revision/context; never retry a trade POST.
    const context=commandContext(view);
@@ -36,13 +36,13 @@
    if(commandContext(view)!==context)throw Error('Состояние или параметры изменились. Проверьте данные и подтвердите команду заново.');
   }
   if(!snapshotCurrent()&&!safeRecovery&&!(mode==='paper'&&paperServerReady))throw Error('Нет свежего снимка. Команда не отправлена.');
-  if(!quoteCurrent()&&!safeRecovery&&!(mode==='paper'&&paperServerReady))throw Error('Нет свежей подтверждённой котировки. Команда не отправлена.');
+  if(!commandQuoteReady(action)&&!safeRecovery)throw Error(mode==='paper'?'Нет последней проверенной котировки MT5. Команда не отправлена.':'Нет свежей подтверждённой котировки. Команда не отправлена.');
   if(busy||pending)throw Error('Предыдущий исход не сверён. Повтор запрещён.');
   if(!view||scope!==view.scope)throw Error('Контекст изменился; обновите данные.');
   const request={id:crypto.randomUUID(),revision,action,...(!safeRecovery&&typeof contextToken==='string'?{context_token:contextToken}:{})};pending=request.id;pendingScope=scope;localStorage.setItem(storageKey('request'),pending);localStorage.setItem(storageKey('scope'),scope);busy=true;lastActionReceipt=null;notice('action-error','');updateBotActivity();
   try{const r=await fetch(apiPath('action'),{method:'POST',headers:{...headers(),'Content-Type':'application/json'},body:JSON.stringify(request),signal:AbortSignal.timeout(4000)});
    if(!r.ok){if([400,401,403,409,413,429].includes(r.status))clearPending();throw Error(r.status===409?'Снимок устарел; обновите данные.':'Команда отклонена сервером.');}
-   const receipt=await r.json();lastActionReceipt={status:receipt.status,reason:receipt.reason};if(['APPLIED','REJECTED','CONFLICT'].includes(receipt.status))clearPending();if(preview&&receipt.status!=='APPLIED')$('preview-error').textContent=actionReceiptText(receipt.status,receipt.reason);
+   const receipt=await r.json();lastActionReceipt={status:receipt.status,reason:receipt.reason,paper_quote:receipt.paper_quote};if(['APPLIED','REJECTED','CONFLICT'].includes(receipt.status))clearPending();if(preview&&receipt.status!=='APPLIED')$('preview-error').textContent=actionReceiptText(receipt.status,receipt.reason);
   }finally{busy=false;await poll();updateBotActivity();}
  }
  function commandContext(v){
@@ -64,7 +64,7 @@
     // A modal pauses polling. Await any old request, then require a new GET.
     if(polling)await pollTask;
     await poll();
-    if((!snapshotCurrent()||!quoteCurrent())&&!(mode==='paper'&&paperServerReady))throw Error('Нет свежего снимка или котировки. Команда не отправлена.');
+    if((!snapshotCurrent()&&!(mode==='paper'&&paperServerReady))||!commandQuoteReady({type:'command',text}))throw Error('Нет свежего снимка или котировки. Команда не отправлена.');
     if(commandContext(view)!==context)throw Error('Состояние или параметры изменились. Проверьте данные и подтвердите команду заново.');
    }
    await send({type:'command',text},revision,scope);
@@ -123,6 +123,8 @@
   if(busy)action='Команда отправляется; исполнение не подтверждено.';
   else if(pending){action=pendingScope!==view.scope?'Ожидается сверка команды другого контекста; новые команды заблокированы.':actionReceiptText(view.action_results?.[pending]?.status,view.action_results?.[pending]?.reason);}
   else if(lastActionReceipt)action='Последняя команда: '+actionReceiptText(lastActionReceipt.status,lastActionReceipt.reason);
+  const usedQuote=lastActionReceipt?.paper_quote??view.paper?.last_command_quote;
+  if(mode==='paper'&&usedQuote)action+=(action?'\n':'')+'Цена последней команды: '+paperQuoteText(usedQuote);
   write('bot-activity-action',action);$('bot-activity-action').dataset.tone=pending?'unknown':lastActionReceipt?.status==='APPLIED'?'success':lastActionReceipt?.status==='UNKNOWN'?'unknown':lastActionReceipt?.status==='REJECTED'||lastActionReceipt?.status==='CONFLICT'?'warning':'info';
   // Raw controller journal remains in Settings; current safety reasons and receipts stay above.
  }
@@ -143,10 +145,20 @@
  let v3Fresh=false,paperServerReady=false,snapshotDeadline=0,quoteDeadline=0;
  const snapshotCurrent=()=>v3Fresh&&performance.now()<snapshotDeadline;
  const quoteCurrent=()=>snapshotCurrent()&&view?.feed?.status==='FRESH'&&feedUtcVerified()&&performance.now()<quoteDeadline;
+ // PAPER commands use only the last verified MT5 quote, never a fabricated price.
+ const paperPriceFree=action=>(action?.type==='command'&&['/stop','/resume_time'].includes(action.text))||['cancel_initial','v3_cancel_entry','v3_cancel_link','v3_cancel_request','paper_costs'].includes(action?.type);
+ function paperQuoteAvailable(q=view?.paper?.command_quote){
+  return q?.available===true&&q.source==='LAST_VERIFIED_MT5'&&[q.bid,q.ask].every(x=>['string','number'].includes(typeof x)&&x!==''&&Number.isFinite(Number(x))&&Number(x)>0)&&Number(q.ask)>=Number(q.bid)&&typeof q.timestamp==='number'&&Number.isFinite(q.timestamp)&&q.timestamp>0&&Number.isFinite(new Date(q.timestamp*1000).getTime())&&typeof q.age_seconds==='number'&&Number.isFinite(q.age_seconds)&&q.age_seconds>=-2;
+ }
+ const commandQuoteReady=action=>mode==='paper'?(paperPriceFree(action)||paperQuoteAvailable()):quoteCurrent();
+ function paperQuoteText(q=view?.paper?.command_quote){
+  if(!paperQuoteAvailable(q))return 'PAPER: последняя проверенная котировка MT5 недоступна. Действия с ценой заблокированы.';
+  return 'PAPER: '+(q.stale?'используется СТАРАЯ последняя проверенная цена MT5':'последняя проверенная цена MT5')+' · Bid '+q.bid+' / Ask '+q.ask+' · возраст '+q.age_seconds.toFixed(1)+' с · '+new Date(q.timestamp*1000).toISOString()+'. Это модель, не текущая цена исполнения LIVE.';
+ }
  function acceptSnapshotFreshness(v,started){
   const f=v.snapshot_freshness,valid=f?.fresh===true&&typeof f.age_seconds==='number'&&Number.isFinite(f.age_seconds)&&f.age_seconds>=0&&typeof f.max_age_seconds==='number'&&Number.isFinite(f.max_age_seconds)&&f.max_age_seconds>0&&f.max_age_seconds<=2;
   // Preserve server evidence separately from local round-trip/elapsed age.
-  paperServerReady=valid&&f.age_seconds<f.max_age_seconds&&v.feed?.status==='FRESH'&&v.feed?.timestamp_semantics==='VERIFIED'&&typeof v.feed.age_seconds==='number'&&Number.isFinite(v.feed.age_seconds)&&v.feed.age_seconds>=-2&&v.feed.age_seconds<5;
+  paperServerReady=valid&&f.age_seconds<f.max_age_seconds;
   snapshotDeadline=valid?started+Math.max(0,f.max_age_seconds-f.age_seconds)*1000:0;
   v3Fresh=valid&&performance.now()<snapshotDeadline;
   const age=v.feed?.age_seconds;
@@ -162,7 +174,7 @@
  function refreshState(){expireSnapshot();return poll();}
 
  const v3Enabled=()=>view?.recovery_mode==='V3';
- const v3Blocked=()=>!view||!(mode==='paper'?paperServerReady:quoteCurrent())||busy||!!pending||view.read_only||!!view.manual_reason||!!view.migration_block||!!view.time_block;
+ const v3Blocked=(action=null)=>!view||!(mode==='paper'?paperServerReady&&commandQuoteReady(action):quoteCurrent())||busy||!!pending||view.read_only||!!view.manual_reason||!!view.migration_block||!!view.time_block;
  function connectionLabel(){
   const status=view?.feed?.status,verified=feedUtcVerified(),fresh=quoteCurrent();
   const role=mode==='paper'?'PAPER':view?.read_only?'LIVE · READ ONLY':'LIVE';
@@ -249,19 +261,19 @@
   $('v3-sl-status').textContent='Расстояние SL от входа для действующих позиций. Шаг 0.10. Изменения отправляются только кнопкой «Подтвердить». Связанные триггеры следуют за SL первой ступени; частичный отказ требует сверки.';
   $('v3-submit-entry').disabled=blocked||!enabled||controls.can_enter!==true;
   $('v3-cancel-request').hidden=!view?.v3_request;
-  $('v3-cancel-request').disabled=blocked||!enabled||!view?.v3_request;
+  $('v3-cancel-request').disabled=v3Blocked({type:'v3_cancel_request'})||!enabled||!view?.v3_request;
   const request=view?.v3_request;const targetTime=request&&Number.isFinite(Number(request.bar_id))?(utcLabel(Number(request.bar_id)+60)?utcLabel(Number(request.bar_id)+60).slice(11,19)+' UTC':'выбранной свечи (время не проверено)'):'выбранной свечи';
   $('v3-request-status').textContent=request?'Ожидается закрытие '+targetTime+': '+request.order_type+', '+profileSummary(request.recovery_profile)+'. Направление по цвету свечи; doji — пропуск.':'Нет запланированного входа. Для следующей попытки RECOVERY дождитесь закрытия всей корзины.';
   const linked=!!view?.v3_link,canCancel=controls.can_cancel_link===true;
   $('v3-link-toggle').textContent=linked?'Отменить триггеры на SL':'Выставить триггеры на SL';
   $('v3-link-toggle').dataset.cancel=String(linked);
-  $('v3-link-toggle').disabled=blocked||!enabled||(linked?!canCancel:controls.can_link!==true);
+  $('v3-link-toggle').disabled=v3Blocked({type:linked?'v3_cancel_link':'v3_link'})||!enabled||(linked?!canCancel:controls.can_link!==true);
   const link=view?.v3_link;
   $('v3-link-status').textContent=linked?(link.cancel?'Отмена запрошена; ожидается сверка MT5.':link.replace?'Перенос SL и связанных триггеров; ожидается сверка.':profileSummary(link.recovery_profile)+' · '+link.side+' STOP на '+link.price+'.'):'';
   $('v3-link-status').hidden=!linked;
   $('v3-control-reason').textContent=!v3Fresh?(mode==='paper'&&paperServerReady?'Свежесть данных проверяется сервером при выполнении команды.':'Ожидание данных сервера.'):friendlyReason(controls.reason);
   $('v3-cancel-entry').hidden=controls.can_cancel_entry!==true;
-  $('v3-cancel-entry').disabled=blocked||!enabled||controls.can_cancel_entry!==true;
+  $('v3-cancel-entry').disabled=v3Blocked({type:'v3_cancel_entry'})||!enabled||controls.can_cancel_entry!==true;
   $('v3-entry-distance').textContent='STOP: от Close выбранной свечи на '+(view?.v3_settings?.entry_distance??'—')+'. Объём и TP — по выбранному профилю.';
   renderProfiles();
   v3InputMode();
@@ -312,10 +324,10 @@
   $('close-'+name+'-panel').onclick=()=>{cancel();setSidePanel(name,false,true);};
  }
  $('save-v3-settings').onclick=async()=>{if(v3Blocked()||!v3Enabled())return;try{const distance=positiveDecimal($('v3-setting-distance').value,'Отступ'),revision=view.revision,scope=view.scope;if(!confirm('Сохранить отступ RECOVERY от Close: '+distance+'?'))return;await send({type:'v3_settings',cycle_id:view.cycle_id,entry_distance:distance},revision,scope);}catch(e){error(e.message);}};
- $('v3-submit-entry').onclick=async()=>{if(v3Blocked()||!v3Enabled()||view.v3_controls?.can_enter!==true||!view.selected_recovery_profile)return;try{const action={type:'v3_entry',cycle_id:view.cycle_id,order_type:$('v3-order-type').value,timing:$('v3-timing').value,side:$('v3-side').value},revision=view.revision,scope=view.scope;if(action.order_type==='STOP'&&action.timing==='now')throw Error('STOP выставляется только после текущей или следующей M1.');const timing=action.timing==='now'?'Сейчас':action.timing==='current'?'После закрытия текущей M1':'После закрытия следующей M1';if(action.order_type==='MARKET'&&!confirm((mode==='paper'?'СИМУЛЯТОР':'ТОРГОВЛЯ')+' — '+action.order_type+', '+profileDetails(view.selected_recovery_profile)+'\nSL: '+view.selected_recovery_profile.sl_distance+'\n'+timing+'\nНаправление: '+(action.timing==='now'?action.side:'по цвету свечи; doji — пропуск')+(action.order_type==='STOP'?'\nОтступ от Close: '+view.v3_settings.entry_distance:'\nЦена определяется свежей котировкой сервера в момент исполнения, а не показанной ранее ценой')+'\nПосле исполнения бот сопровождает корзину.'))return;await send(action,revision,scope);}catch(e){error(e.message);}};
- $('v3-cancel-request').onclick=async()=>{if(v3Blocked()||!v3Enabled()||!view.v3_request)return;const action={type:'v3_cancel_request',cycle_id:view.cycle_id},revision=view.revision,scope=view.scope;try{await send(action,revision,scope);}catch(e){error(e.message);}};
- $('v3-link-toggle').onclick=async()=>{if(v3Blocked()||!v3Enabled())return;try{const cancel=!!view.v3_link;if(cancel?view.v3_controls?.can_cancel_link!==true:view.v3_controls?.can_link!==true||!view.selected_recovery_profile)return;const action=cancel?{type:'v3_cancel_link',cycle_id:view.cycle_id}:{type:'v3_link',cycle_id:view.cycle_id,expected_positions:view.positions.map(p=>p.id).sort()},revision=view.revision,scope=view.scope;await send(action,revision,scope);}catch(e){error(e.message);}};
- $('v3-cancel-entry').onclick=async()=>{if(v3Blocked()||!v3Enabled()||view.v3_controls?.can_cancel_entry!==true)return;try{await send({type:'v3_cancel_entry',cycle_id:view.cycle_id},view.revision,view.scope);}catch(e){error(e.message);}};
+ $('v3-submit-entry').onclick=async()=>{if(v3Blocked()||!v3Enabled()||view.v3_controls?.can_enter!==true||!view.selected_recovery_profile)return;try{const action={type:'v3_entry',cycle_id:view.cycle_id,order_type:$('v3-order-type').value,timing:$('v3-timing').value,side:$('v3-side').value},revision=view.revision,scope=view.scope;if(action.order_type==='STOP'&&action.timing==='now')throw Error('STOP выставляется только после текущей или следующей M1.');const timing=action.timing==='now'?'Сейчас':action.timing==='current'?'После закрытия текущей M1':'После закрытия следующей M1';if(action.order_type==='MARKET'&&!confirm((mode==='paper'?'СИМУЛЯТОР':'ТОРГОВЛЯ')+' — '+action.order_type+', '+profileDetails(view.selected_recovery_profile)+'\nSL: '+view.selected_recovery_profile.sl_distance+'\n'+timing+'\nНаправление: '+(action.timing==='now'?action.side:'по цвету свечи; doji — пропуск')+(action.order_type==='STOP'?'\nОтступ от Close: '+view.v3_settings.entry_distance:(mode==='paper'?'\n'+paperQuoteText()+'\nСервер использует последнюю проверенную MT5 котировку на момент команды.':'\nЦена определяется свежей котировкой сервера в момент исполнения, а не показанной ранее ценой'))+'\nПосле исполнения бот сопровождает корзину.'))return;await send(action,revision,scope);}catch(e){error(e.message);}};
+ $('v3-cancel-request').onclick=async()=>{if(v3Blocked({type:'v3_cancel_request'})||!v3Enabled()||!view.v3_request)return;const action={type:'v3_cancel_request',cycle_id:view.cycle_id},revision=view.revision,scope=view.scope;try{await send(action,revision,scope);}catch(e){error(e.message);}};
+ $('v3-link-toggle').onclick=async()=>{if(v3Blocked({type:view?.v3_link?'v3_cancel_link':'v3_link'})||!v3Enabled())return;try{const cancel=!!view.v3_link;if(cancel?view.v3_controls?.can_cancel_link!==true:view.v3_controls?.can_link!==true||!view.selected_recovery_profile)return;const action=cancel?{type:'v3_cancel_link',cycle_id:view.cycle_id}:{type:'v3_link',cycle_id:view.cycle_id,expected_positions:view.positions.map(p=>p.id).sort()},revision=view.revision,scope=view.scope;await send(action,revision,scope);}catch(e){error(e.message);}};
+ $('v3-cancel-entry').onclick=async()=>{if(v3Blocked({type:'v3_cancel_entry'})||!v3Enabled()||view.v3_controls?.can_cancel_entry!==true)return;try{await send({type:'v3_cancel_entry',cycle_id:view.cycle_id},view.revision,view.scope);}catch(e){error(e.message);}};
  const shiftSlDistance=(raw,delta)=>{const value=String(raw);if(!/^\d+(\.\d+)?$/.test(value))return null;const fraction=(value.split('.')[1]||'').length,scale=Math.max(2,fraction),units=BigInt(value.replace('.',''))*10n**BigInt(scale-fraction)+BigInt(delta)*10n**BigInt(scale-2);if(units<=0n)return null;const text=units.toString().padStart(scale+1,'0');return text.slice(0,-scale)+'.'+text.slice(-scale);};
  function v3AdjustSl(delta){if(v3Blocked()||!v3Enabled()||view.v3_controls?.can_adjust_sl!==true)return;if(v3SlDraft&&v3SlDraft.key!==slDraftKey())v3SlDraft=null;const distance=shiftSlDistance(v3SlDraft?.distance??view.v3_sl_distance,delta);if(distance===null)return;v3SlDraft={key:slDraftKey(),distance};v3Render();}
  $('v3-sl-minus').onclick=()=>v3AdjustSl(-10);$('v3-sl-plus').onclick=()=>v3AdjustSl(10);
@@ -452,7 +464,7 @@
   $('safety').textContent=''; // Safety reasons remain visible in the colored activity area, without duplicate raw labels.
   $('quote').textContent='Bid '+(view.feed.quote?.bid??'—')+' / Ask '+(view.feed.quote?.ask??'—')+' · возраст '+(view.feed.age_seconds??'—')+' сек.';
   $('source-label').textContent=(mode==='paper'?'Источник: MT5 read-only / бумажные исполнения':'Источник: MT5 / торговый контур')+' · '+(utcLabel(view.feed.timestamp)||'время MT5 не проверено');
-  if(mode==='paper'){$('paper-status').textContent=view.paper?.paused_gap?'Перерыв данных или перезапуск. Пропущенные исполнения не восстанавливаются; подтвердите продолжение.':'Моделируются только наблюдаемые свежие тики. Пропущенный путь цены неизвестен.';if(document.activeElement!==$('paper-cost'))$('paper-cost').value=view.paper?.commission_per_lot_side??'0';}
+  if(mode==='paper'){$('paper-command-quote').textContent=paperQuoteText();$('paper-command-quote').dataset.tone=view.paper?.command_quote?.stale?'warning':'info';$('paper-status').textContent=view.paper?.paused_gap?'Перерыв данных или перезапуск. Пропущенные исполнения не восстанавливаются; подтвердите продолжение.':'Моделируются только наблюдаемые свежие тики. Пропущенный путь цены неизвестен.';if(document.activeElement!==$('paper-cost'))$('paper-cost').value=view.paper?.commission_per_lot_side??'0';}
   $('edit-status').textContent=view.edit?'Правка '+view.edit.stage+': показываются фактические данные брокера. При частичном отказе автоматизация остановится.':'';$('journal').textContent=view.journal.join('\n');
   $('request-status').textContent=pending?'Запрос '+pending+': '+(pendingScope===view.scope?view.action_results[pending]?.status??'ожидание':'другой контекст')+'. До сверки новые команды запрещены. При UNKNOWN проверьте журнал и брокера на VPS; перезагрузка не разрешает повтор.':'';
   for(const id of ['start','stop','resume','reset','cancel-initial','save-settings','reverse-enable','reverse-disable','save-tp-grid','apply-level','paper-resume','paper-flatten','paper-save-cost'])$(id).disabled=!!pending||busy;
@@ -467,7 +479,7 @@
   $('reverse-enable').title=view.reverse_controls?.reason??'';$('reverse-disable').title=view.reverse_controls?.reason??'';
   if(loadedScope!==view.scope){fields();loadedScope=view.scope;}v3Render();draw();
  }
- async function poll(){if(polling||busy)return;polling=true;pollTask=(async()=>{const started=performance.now();try{const r=await fetch(apiPath('state'),{headers:headers(),signal:AbortSignal.timeout(2500)});if(!r.ok){if([401,403].includes(r.status)){$('login').hidden=false;$('workspace').hidden=true;}throw Error('Нет авторизованного снимка');}const v=await r.json();if(v.contract!=='ticket_basket_v1'||(mode==='paper'?v.mode!=='PAPER':v.mode==='PAPER'))throw Error('Несовместимая версия контроллера');view=v;acceptSnapshotFreshness(v,started);const status=pending&&pendingScope===v.scope?v.action_results[pending]?.status:null;if(['APPLIED','REJECTED','CONFLICT'].includes(status)){lastActionReceipt={status,reason:v.action_results[pending]?.reason};clearPending();}$('login').hidden=true;$('workspace').hidden=false;render();}catch(e){v3Fresh=false;paperServerReady=false;if(view){v3Render();connectionLabel();updateBotActivity();$('paper-interrupt').disabled=true;}$('feed-status').textContent='Нет свежего снимка';}finally{polling=false;}})();return pollTask;}
+ async function poll(){if(polling||busy)return;polling=true;pollTask=(async()=>{const started=performance.now();try{const r=await fetch(apiPath('state'),{headers:headers(),signal:AbortSignal.timeout(2500)});if(!r.ok){if([401,403].includes(r.status)){$('login').hidden=false;$('workspace').hidden=true;}throw Error('Нет авторизованного снимка');}const v=await r.json();if(v.contract!=='ticket_basket_v1'||(mode==='paper'?v.mode!=='PAPER':v.mode==='PAPER'))throw Error('Несовместимая версия контроллера');view=v;acceptSnapshotFreshness(v,started);const status=pending&&pendingScope===v.scope?v.action_results[pending]?.status:null;if(['APPLIED','REJECTED','CONFLICT'].includes(status)){lastActionReceipt={status,reason:v.action_results[pending]?.reason,paper_quote:v.action_results[pending]?.paper_quote};clearPending();}$('login').hidden=true;$('workspace').hidden=false;render();}catch(e){v3Fresh=false;paperServerReady=false;if(view){v3Render();connectionLabel();updateBotActivity();$('paper-interrupt').disabled=true;}$('feed-status').textContent='Нет свежего снимка';}finally{polling=false;}})();return pollTask;}
  const defaultPrefs={mainTrend:false,mainCycle:true,pane:null,pattern:{trend:false,cycle:true},figure:{trend:false,cycle:true},liquidity:false,opacity:20,colors:{BUY:'#26a69a',SELL:'#ef5350',sl:'#ef5350',tp:'#26a69a',entry:'#e0b565',up:'#26a69a',down:'#ef5350',grid:'#25282e',zone:'#e0b565'}};
  let prefs=structuredClone(defaultPrefs);try{const saved=JSON.parse(localStorage.getItem('chart-preferences-v1')??'null');if(saved){for(const k of ['mainTrend','mainCycle','liquidity'])if(typeof saved[k]==='boolean')prefs[k]=saved[k];if(['pattern','figure',null].includes(saved.pane))prefs.pane=saved.pane;for(const pane of ['pattern','figure'])for(const k of ['trend','cycle'])if(typeof saved[pane]?.[k]==='boolean')prefs[pane][k]=saved[pane][k];if(Number.isFinite(saved.opacity))prefs.opacity=Math.max(0,Math.min(100,saved.opacity));for(const k of Object.keys(prefs.colors))if(/^#[0-9a-f]{6}$/i.test(saved.colors?.[k]))prefs.colors[k]=saved.colors[k];}}catch{}
  const savePrefs=()=>{localStorage.setItem('chart-preferences-v1',JSON.stringify(prefs));layout();draw();};
@@ -482,16 +494,16 @@
  for(const [k,v]of Object.entries(prefs.colors)){const label=document.createElement('label');label.textContent=colorNames[k];const input=document.createElement('input');input.type='color';input.id='color-'+k;input.value=v;input.oninput=()=>{prefs.colors[k]=input.value;savePrefs();};label.append(input);$('color-fields').append(label);}
  $('paper-resume').onclick=async()=>{if(mode!=='paper'||!confirm('Продолжить с новых тиков? Пропущенные исполнения не восстанавливаются; текущий разрыв цены может дать исполнение на следующем тике.'))return;try{await send({type:'paper_resume'});}catch(e){error(e.message);}};
  // Explicit PAPER-only settlement. Capture scope, cycle and obligations before confirmation.
- function paperInterruptDisabled(){return mode!=='paper'||!view||!quoteCurrent()||!!pending||busy||view.read_only||!view.cycle_id||!!view.migration_block||!!view.time_block||view.feed?.status!=='FRESH';}
+ function paperInterruptDisabled(){return mode!=='paper'||!view||!paperServerReady||!commandQuoteReady({type:'paper_interrupt'})||!!pending||busy||view.read_only||!view.cycle_id||!!view.migration_block||!!view.time_block;}
  $('paper-interrupt').onclick=async()=>{
   if(paperInterruptDisabled())return;
   const v=view,revision=v.revision,scope=v.scope;
   const action={type:'paper_interrupt',cycle_id:v.cycle_id,expected_positions:v.positions.map(p=>p.id).sort(),expected_orders:v.orders.map(o=>o.id).sort(),confirmed:true,gap_confirmed:v.paper?.paused_gap===true};
-  const gap=action.gap_confirmed?'\nПосле перерыва/перезапуска: закрытие только по новой проверенной котировке. Пропущенные тики и исполнения не восстанавливаются.':'';
-  if(!confirm('СИМУЛЯТОР — прервать цикл?\nЗакрыть все виртуальные позиции ('+action.expected_positions.length+'): BUY по актуальному Bid, SELL по актуальному Ask. Отменить все ожидающие виртуальные ордера ('+action.expected_orders.length+').\nКомиссия модели: '+v.paper.commission_per_lot_side+' UST / лот / сторона. Убытки с расходами останутся в RECOVERY и истории. Новый цикл автоматически не начнётся.'+gap))return;
+  const gap=action.gap_confirmed?'\nПосле перерыва/перезапуска: закрытие по последней проверенной котировке MT5, которая может быть старой. Пропущенные тики и исполнения не восстанавливаются.':'';
+  if(!confirm('СИМУЛЯТОР — прервать цикл?\nЗакрыть все виртуальные позиции ('+action.expected_positions.length+'): BUY по последнему проверенному Bid, SELL по последнему проверенному Ask.\n'+paperQuoteText()+' Отменить все ожидающие виртуальные ордера ('+action.expected_orders.length+').\nКомиссия модели: '+v.paper.commission_per_lot_side+' UST / лот / сторона. Убытки с расходами останутся в RECOVERY и истории. Новый цикл автоматически не начнётся.'+gap))return;
   try{await send(action,revision,scope);}catch(e){error(e.message);}
  };
- $('paper-flatten').onclick=async()=>{if(mode!=='paper'||!confirm('Закрыть только бумажные билеты по текущей котировке и отменить бумажные STOP? Долг сохраняется.'))return;try{await send({type:'paper_flatten',confirmed:true});}catch(e){error(e.message);}};
+ $('paper-flatten').onclick=async()=>{if(mode!=='paper'||!confirm('Закрыть только бумажные билеты по последней проверенной котировке MT5 и отменить бумажные STOP? Долг сохраняется.\n'+paperQuoteText()))return;try{await send({type:'paper_flatten',confirmed:true});}catch(e){error(e.message);}};
  $('paper-save-cost').onclick=async()=>{if(mode!=='paper'||!confirm('Изменить модель комиссии для будущих бумажных исполнений?'))return;try{await send({type:'paper_costs',commission_per_lot_side:$('paper-cost').value});}catch(e){error(e.message);}};
  let logPage=0;
  async function showLogs(){const scope=$('log-scope').value;try{const r=await fetch('/api/logs?scope='+encodeURIComponent(scope)+'&page='+logPage,{headers:{'X-Local-Control':'1'},signal:AbortSignal.timeout(4000)});if(!r.ok)throw Error('Логи недоступны: '+r.status);const v=await r.json();if(scope!==$('log-scope').value)return;$('logs-view').textContent=v.text;$('logs-status').textContent='Страница '+(v.page+1)+' · ограниченная выгрузка';$('logs-prev').disabled=v.page===0;$('logs-next').disabled=!v.has_more;}catch(e){$('logs-status').textContent=e.message;}}

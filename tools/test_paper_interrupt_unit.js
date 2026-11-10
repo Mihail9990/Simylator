@@ -7,7 +7,7 @@ assert(html.includes('id="paper-interrupt">Прервать цикл'));
 const elements={'paper-interrupt':{}};
 const state={scope:'PAPER-fixture',revision:7,cycle_id:'cycle-1',positions:[{id:'position-1'}],orders:[{id:'order-1'}],paper:{paused_gap:false,commission_per_lot_side:'2'},feed:{status:'FRESH'}};
 let approve=false,calls=[],dialogs=[];
-const ctx=vm.createContext({$:id=>elements[id],mode:'paper',view:state,v3Fresh:true,quoteCurrent:()=>ctx.v3Fresh,pending:null,busy:false,
+const ctx=vm.createContext({$:id=>elements[id],mode:'paper',view:state,paperServerReady:true,commandQuoteReady:()=>ctx.quoteAvailable,paperQuoteText:()=> 'СТАРАЯ последняя проверенная цена MT5 · возраст 60.0 с',quoteAvailable:true,pending:null,busy:false,
  confirm:text=>{dialogs.push(text);return approve;},send:async(...args)=>{calls.push(args);ctx.pending='pending-id';},error:message=>assert.fail(message)});
 vm.runInContext(source.slice(source.indexOf(' // Explicit PAPER-only settlement.'),source.indexOf(" $('paper-flatten').onclick=")),ctx);
 (async()=>{
@@ -17,17 +17,17 @@ vm.runInContext(source.slice(source.indexOf(' // Explicit PAPER-only settlement.
  assert.equal(a.type,'paper_interrupt');assert.equal(a.confirmed,true);assert.equal(a.gap_confirmed,false);
  assert.deepEqual(Array.from(a.expected_positions),['position-1']);assert.deepEqual(Array.from(a.expected_orders),['order-1']);
  assert.equal(a.cycle_id,'cycle-1');assert.equal(revision,7);assert.equal(scope,'PAPER-fixture');
- assert(dialogs[1].includes('BUY по актуальному Bid, SELL по актуальному Ask'));
+ assert(dialogs[1].includes('BUY по последнему проверенному Bid, SELL по последнему проверенному Ask'));
  assert(dialogs[1].includes('RECOVERY'));assert(dialogs[1].includes('Новый цикл автоматически не начнётся'));
  await click();assert.equal(calls.length,1,'Repeated pending click must not send');ctx.pending=null;
- for(const [key,value] of [['v3Fresh',false],['busy',true],['mode','live']]){
+ for(const [key,value] of [['paperServerReady',false],['quoteAvailable',false],['busy',true],['mode','live']]){
   const old=ctx[key];ctx[key]=value;await click();assert.equal(calls.length,1);ctx[key]=old;
  }
  for(const [key,value] of [['cycle_id',null],['time_block',{reason:'clock'}],['migration_block','legacy'],['read_only',true]]){
   const old=state[key];state[key]=value;await click();assert.equal(calls.length,1);state[key]=old;
  }
- state.feed.status='WAITING';await click();assert.equal(calls.length,1);state.feed.status='FRESH';
- state.paper.paused_gap=true;await click();assert.equal(calls.length,2);assert.equal(calls[1][0].gap_confirmed,true);
+ state.feed.status='WAITING';await click();assert.equal(calls.length,2,'stale feed does not block verified PAPER command quote');ctx.pending=null;assert(dialogs.at(-1).includes('СТАРАЯ'));state.feed.status='FRESH';
+ state.paper.paused_gap=true;await click();assert.equal(calls.length,3);assert.equal(calls[2][0].gap_confirmed,true);
  assert(dialogs.at(-1).includes('Пропущенные тики и исполнения не восстанавливаются'));
  console.log('PAPER interruption UI: cancel, repeated click, scope, stale and gap confirmation passed');
 })().catch(error=>{console.error(error);process.exitCode=1;});

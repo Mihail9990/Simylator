@@ -47,15 +47,13 @@ class PaperOwnerFreshnessTest(unittest.TestCase):
             self.assertEqual(completed['guard_stage'],'execution_queue')
             self.assertAlmostEqual(completed['queue_age_seconds'],seconds)
 
-    def test_actual_stale_quote_and_failed_read_never_execute(self):
+    def test_stale_quote_does_not_block_explicit_local_cost_command(self):
         request=self.request();self.paper.mailbox.submit(request)
         self.now+=2.1;self.reader.now+=6
         self.paper.step()
-        self.assertEqual(self.status(request),'REJECTED')
-        self.assertEqual(self.paper.exchange.p['commission_per_lot_side'],'0')
-        completed=[r for r in self.paper.diagnostics.drain() if r['event']=='action_completed'][-1]
-        self.assertEqual(completed['guard_stage'],'execution_current')
-        self.assertGreater(completed['quote_age_seconds'],5)
+        self.assertEqual(self.status(request),'APPLIED')
+        self.assertEqual(self.paper.exchange.p['commission_per_lot_side'],'2')
+        self.assertTrue(self.paper.controller.state['control_receipts'][request['id']]['paper_quote']['stale'])
 
     def test_slow_current_read_is_not_made_fresh(self):
         request=self.request();self.paper.mailbox.submit(request)
@@ -119,7 +117,7 @@ class PaperOwnerFreshnessTest(unittest.TestCase):
         self.paper.mailbox.submit(request);self.delayed();self.paper.step()
         self.assertEqual(self.status(request),'REJECTED')
 
-    def test_projection_time_is_included_in_quote_age(self):
+    def test_projection_time_does_not_make_old_quote_fresh(self):
         request=self.request();self.paper.mailbox.submit(request)
         self.reader.data['timestamp']=self.reader.now-4.8
         view=self.paper.view
@@ -128,11 +126,10 @@ class PaperOwnerFreshnessTest(unittest.TestCase):
             self.now+=.4;self.reader.now+=.4
             return result
         with patch.object(self.paper,'view',slow):self.paper.step()
-        self.assertEqual(self.status(request),'REJECTED')
-        self.assertEqual(self.paper.exchange.p['commission_per_lot_side'],'0')
-        completed=[r for r in self.paper.diagnostics.drain() if r['event']=='action_completed'][-1]
-        self.assertEqual(completed['error_code'],'FEED_STALE')
-        self.assertGreater(completed['quote_age_seconds'],5)
+        self.assertEqual(self.status(request),'APPLIED')
+        self.assertEqual(self.paper.exchange.p['commission_per_lot_side'],'2')
+        quote=self.paper.controller.state['control_receipts'][request['id']]['paper_quote']
+        self.assertTrue(quote['stale']);self.assertGreater(quote['age_seconds'],5)
 
     def test_changed_reviewed_context_refuses_without_rebase(self):
         request=self.request();self.paper.mailbox.submit(request);self.delayed()

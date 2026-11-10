@@ -35,7 +35,7 @@ class Element{
 const elements=Object.fromEntries(ids.map(id=>[id,new Element()]));
 const $=id=>{assert(elements[id],'known element '+id);return elements[id];};
 Object.assign($('v3-order-type'),{value:'STOP'});$('v3-timing').value='current';$('v3-side').value='BUY';
-const base={feed:{status:'FRESH',timestamp_semantics:'VERIFIED',age_seconds:0},recovery_mode:'V3',cycle_id:'c1',scope:'PAPER-fixture',revision:7,read_only:false,positions:[{id:'p1'}],orders:[],v3_sl_distance:'1.50',v3_settings:{entry_distance:'1.00',count_presets:[4,6,10]},v3_controls:{can_enter:true,can_link:true,can_cancel_link:false,can_adjust_sl:true,reason:''}};
+const base={paper:{command_quote:{available:true,bid:'100',ask:'101',timestamp:1804800000,age_seconds:0,stale:false,source:'LAST_VERIFIED_MT5'}},feed:{status:'FRESH',timestamp_semantics:'VERIFIED',age_seconds:0},recovery_mode:'V3',cycle_id:'c1',scope:'PAPER-fixture',revision:7,read_only:false,positions:[{id:'p1'}],orders:[],v3_sl_distance:'1.50',v3_settings:{entry_distance:'1.00',count_presets:[4,6,10]},v3_controls:{can_enter:true,can_link:true,can_cancel_link:false,can_adjust_sl:true,reason:''}};
 const profile={id:'six',name:'Six',stages:Array.from({length:6},(_,i)=>({volume:'0.01',tp_distance:String((i+1)*.25)})),total_volume:'0.06',sl_distance:'1.50'};
 base.recovery_profiles={selected_profile_id:'six',profiles:[profile,{id:'mix',name:'Mix',stages:[{volume:'0.05',tp_distance:'0.25'},{volume:'0.02',tp_distance:'0.50'},{volume:'0.01',tp_distance:'0.75'}]}],recovery_sl_distance:'1.50'};base.selected_recovery_profile=profile;base.current_recovery_profiles=[{...profile,group_id:'g1'}];
 const actions=[],dialogs=[],errors=[],store=new Map();let accept=true;
@@ -200,6 +200,14 @@ async function main(){
  ctx.preview={value:1.5};vm.runInContext('draw()',ctx);assert.equal($('preview-backdrop').hidden,false);assert.equal($('command-drawer').inert,true);assert.equal($('bottom-tabs').inert,true);
  ctx.preview=null;vm.runInContext('draw()',ctx);assert.equal($('preview-backdrop').hidden,true);assert.equal($('command-drawer').inert,false);
  assert.equal(actions.length,before,'all gestures and navigation are display-only');
+ // No last verified price: cancellation stays available, priced actions stay blocked.
+ ctx.view=structuredClone(base);ctx.view.paper.command_quote={available:false};ctx.view.feed.status='WAITING';ctx.view.v3_request={order_type:'STOP'};ctx.view.v3_link={};ctx.view.v3_controls.can_cancel_link=true;ctx.view.v3_controls.can_cancel_entry=true;
+ vm.runInContext('paperServerReady=true;v3Render()',ctx);
+ for(const id of ['v3-cancel-request','v3-cancel-entry','v3-link-toggle'])assert.equal($(id).disabled,false,id);
+ for(const id of ['v3-submit-entry','v3-sl-plus'])assert.equal($(id).disabled,true,id);
+ for(const id of ['v3-cancel-request','v3-cancel-entry','v3-link-toggle']){await $(id).onclick();assert(actions.at(-1).a.type.startsWith('v3_cancel'));}
+ ctx.pending='unknown';vm.runInContext('v3Render()',ctx);assert($('v3-cancel-entry').disabled);ctx.pending=null;
+ vm.runInContext('paperServerReady=false;v3Render()',ctx);assert($('v3-cancel-entry').disabled);
  console.log('PASS Node V3 handler tests: actual source, DOM doubles, inputs/actions/revisions, V3-only controls, legacy migration guard, confirmation/cancel, controls, stale/read-only/UNKNOWN guards. Browser layout NOT verified.');
 }
 main().catch(e=>{console.error(e);process.exit(1);});

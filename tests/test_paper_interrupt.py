@@ -120,7 +120,9 @@ class PaperInterruptTest(PaperTest):
             with self.assertRaises(ActionRejected):self.action(dict(a,**change))
             self.assertEqual(before,self.p)
         self.reader.now+=6
-        with self.assertRaises(ActionRejected):self.action(a)
+        # Quote age is now permitted for explicit PAPER commands; unrelated
+        # confirmation, history and time-contract checks remain strict.
+        self.assertTrue(self.session.view()['paper']['command_quote']['stale'])
         self.reader.tick('4000.9','4001');self.step()
         with patch.object(self.reader.safety,'check',return_value='CLOCK_STEP'):
             with self.assertRaises(ActionRejected):self.action(self.request())
@@ -129,7 +131,7 @@ class PaperInterruptTest(PaperTest):
         with self.assertRaises(ActionRejected):self.action(self.request())
         self.assertEqual(before,self.p)
 
-    def test_time_or_quote_becoming_stale_during_planning_is_rejected(self):
+    def test_time_change_rejected_but_quote_age_is_labelled_during_planning(self):
         self.initial();before=deepcopy(self.p)
         with patch.object(self.reader.safety,'check',side_effect=[None,'CLOCK_CHANGED']):
             with self.assertRaises(ActionRejected):self.action(self.request())
@@ -140,8 +142,9 @@ class PaperInterruptTest(PaperTest):
             if len(calls)==2:self.reader.now+=6
             return fresh()
         with patch.object(self.session,'_fresh',side_effect=delayed):
-            with self.assertRaises(ActionRejected):self.action(self.request())
-        self.assertEqual(before,self.p);self.assertIsNotNone(self.session.controller.state['cycle'])
+            self.action(self.request())
+        self.assertFalse(self.p['positions']);self.assertIsNone(self.session.controller.state['cycle'])
+        self.assertTrue(self.session.view()['paper']['last_command_quote']['stale'])
 
     def test_restart_gap_requires_explicit_current_quote_confirmation(self):
         self.initial();self.session.close();self.reader.tick('3980','3980.1',seconds=60);self.create();self.step()

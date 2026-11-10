@@ -521,6 +521,9 @@ class Controller:
         for cmd in list(self.state['commands'].values()):
             if cmd['status'] != 'READY' or (kinds is not None and cmd['kind'] not in kinds):
                 continue
+            permitted = getattr(self.broker, 'command_permitted', None)
+            if permitted is not None and not permitted(cmd['id']):
+                continue
             if (getattr(self.broker, 'backend_id', '') == 'mt5_direct_v1'
                     and cmd['kind'] in {'STOP', 'MARKET'}
                     and any(other['kind'] in {'STOP', 'MARKET'} and other['status'] == 'UNKNOWN'
