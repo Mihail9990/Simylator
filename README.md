@@ -38,7 +38,7 @@ Rollback разрешён только между совместимыми PAPER
 
 Остановите PAPER и запустите `SETUP_PAPER_PHONE_HTTPS.bat`. Установщик отдельно проверяет корень PAPER, публичный адрес, пароль, порт 8766, существующие службы и занятость 443/80. Он предлагает подтверждения перед системными изменениями. Если порт уже используется LIVE, установка останавливается без изменения LIVE.
 
-Подробнее: [PAPER HTTPS](docs/PAPER_HTTPS_RU.md), [график](docs/PAPER_CHART_RU.md), [RECOVERY V3](docs/RECOVERY_V3_RU.md).
+Подробнее: [PAPER HTTPS](docs/PAPER_HTTPS_RU.md), [график](docs/PAPER_CHART_RU.md), [RECOVERY V3](docs/RECOVERY_V3_RU.md), [сохранённые профили RECOVERY](docs/RECOVERY_PROFILES_RU.md).
 
 ## Запуск из исходников
 
