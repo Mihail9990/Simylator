@@ -35,7 +35,7 @@ base.recovery_profiles={selected_profile_id:'six',profiles:[profile,{id:'mix',na
 const actions=[],dialogs=[],errors=[],store=new Map();let accept=true;
 const ctx=vm.createContext({$,friendlyReason:x=>x??'',document:{createElement:()=>new Element()},performance:{now:()=>0},view:structuredClone(base),busy:false,pending:null,mode:'paper',confirm:msg=>{dialogs.push(msg);return accept;},send:async(a,r,s)=>actions.push({a,r,s}),error:m=>errors.push(m),localStorage:{getItem:k=>store.get(k),setItem:(k,v)=>store.set(k,v)},fields:()=>{},console});
 const part=src.slice(src.indexOf(' // V3 reuses scoped receipts'),src.indexOf(' function fields(){'));
-vm.runInContext(part,ctx);vm.runInContext('v3Fresh=true;snapshotDeadline=2000;quoteDeadline=5000;v3FillSettings();v3Render()',ctx);
+vm.runInContext(part,ctx);vm.runInContext('paperServerReady=true;v3Fresh=true;snapshotDeadline=2000;quoteDeadline=5000;v3FillSettings();v3Render()',ctx);
 async function main(){
  // Execute actual chart rendering with verified, unverified and missing semantics.
  ctx.svg=$('chart');ctx.ns='http://www.w3.org/2000/svg';ctx.document.createElementNS=()=>new Element();
@@ -131,10 +131,14 @@ async function main(){
  $('recovery-sl-distance').value='2.25';await $('recovery-save-sl').onclick();assert.equal(actions.at(-1).a.recovery_sl_distance,'2.25');
  ctx.view=structuredClone(base);vm.runInContext('v3Render()',ctx);assert($('recovery-current-summary').textContent.includes('g1'));assert($('recovery-current-summary').textContent.includes('0.06'));
  for(const block of ['busy','pending','read_only','stale']){
-  ctx.busy=block==='busy';ctx.pending=block==='pending'?'req':null;ctx.view.read_only=block==='read_only';vm.runInContext('v3Fresh='+String(block!=='stale')+';v3Render()',ctx);
+  ctx.busy=block==='busy';ctx.pending=block==='pending'?'req':null;ctx.view.read_only=block==='read_only';vm.runInContext('paperServerReady='+String(block!=='stale')+';v3Fresh='+String(block!=='stale')+';v3Render()',ctx);
   before=actions.length;await $('v3-link-toggle').onclick();await $('v3-submit-entry').onclick();await $('v3-sl-plus').onclick();await $('v3-sl-confirm').onclick();await $('recovery-profile-apply').onclick();await $('recovery-profile-save').onclick();await $('recovery-save-sl').onclick();assert.equal(actions.length,before,block);assert.equal($('v3-link-toggle').disabled,true);
  }
- ctx.busy=false;ctx.pending=null;ctx.view.read_only=false;vm.runInContext('v3Fresh=true',ctx);
+ ctx.busy=false;ctx.pending=null;ctx.view.read_only=false;vm.runInContext('paperServerReady=true;v3Fresh=true',ctx);
+ vm.runInContext('paperServerReady=true;v3Fresh=false;v3Render()',ctx);
+ assert.equal($('v3-submit-entry').disabled,false,'PAPER server-fresh state remains actionable despite client delay');
+ assert($('v3-control-reason').textContent.includes('проверяется сервером'));
+ vm.runInContext('v3Fresh=true',ctx);
  ctx.view.recovery_mode='V1';ctx.view.migration_block='Legacy active cycle needs reconciliation';vm.runInContext('v3Render()',ctx);
  assert.equal($('v3-panels').hidden,false,'V3 remains the only panel even for blocked legacy state');assert.equal($('v3-submit-entry').disabled,true);
  before=actions.length;await $('v3-submit-entry').onclick();await $('save-v3-settings').onclick();assert.equal(actions.length,before);

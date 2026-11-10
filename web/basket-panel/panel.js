@@ -24,8 +24,18 @@
  function clearPending(){pending=null;pendingScope=null;localStorage.removeItem(storageKey('request'));localStorage.removeItem(storageKey('scope'));}
  async function send(action,revision=view?.revision,scope=view?.scope){
   const safeRecovery=action.type==='command'&&['/stop','/resume_time'].includes(action.text);
-  if(!snapshotCurrent()&&!safeRecovery)throw Error('Нет свежего снимка. Команда не отправлена.');
-  if(!quoteCurrent()&&!safeRecovery)throw Error('Нет свежей подтверждённой котировки. Команда не отправлена.');
+  if(busy||pending)throw Error('Предыдущий исход не сверён. Повтор запрещён.');
+  if(!view||scope!==view.scope)throw Error('Контекст изменился; обновите данные.');
+  if(!safeRecovery&&(!snapshotCurrent()||!quoteCurrent())){
+   // Confirmation dialogs can outlive the client snapshot. Refresh only reads,
+   // keeping the exact reviewed revision/context; never retry a trade POST.
+   const context=commandContext(view);
+   if(polling)await pollTask;
+   await poll();
+   if(commandContext(view)!==context)throw Error('Состояние или параметры изменились. Проверьте данные и подтвердите команду заново.');
+  }
+  if(!snapshotCurrent()&&!safeRecovery&&!(mode==='paper'&&paperServerReady))throw Error('Нет свежего снимка. Команда не отправлена.');
+  if(!quoteCurrent()&&!safeRecovery&&!(mode==='paper'&&paperServerReady))throw Error('Нет свежей подтверждённой котировки. Команда не отправлена.');
   if(busy||pending)throw Error('Предыдущий исход не сверён. Повтор запрещён.');
   if(!view||scope!==view.scope)throw Error('Контекст изменился; обновите данные.');
   const request={id:crypto.randomUUID(),revision,action};pending=request.id;pendingScope=scope;localStorage.setItem(storageKey('request'),pending);localStorage.setItem(storageKey('scope'),scope);busy=true;lastActionReceipt=null;notice('action-error','');updateBotActivity();
@@ -53,7 +63,7 @@
     // A modal pauses polling. Await any old request, then require a new GET.
     if(polling)await pollTask;
     await poll();
-    if(!snapshotCurrent()||!quoteCurrent())throw Error('Нет свежего снимка или котировки. Команда не отправлена.');
+    if((!snapshotCurrent()||!quoteCurrent())&&!(mode==='paper'&&paperServerReady))throw Error('Нет свежего снимка или котировки. Команда не отправлена.');
     if(commandContext(view)!==context)throw Error('Состояние или параметры изменились. Проверьте данные и подтвердите команду заново.');
    }
    await send({type:'command',text},revision,scope);
@@ -89,16 +99,18 @@
   const write=(id,text)=>{if($(id).textContent!==text)$(id).textContent=text;};
   if(!view){write('bot-activity-state','Ожидание снимка контроллера.');return;}
   const phases={WAIT_START:'Ожидание запуска',WAIT_CANDLE:'Ожидаю закрытие свечи',INITIAL_WAIT:'Ожидаю закрытие свечи',INITIAL_PENDING:'Ожидаю сверку состояния ордеров',INITIAL_POSITION:'Ожидаю сверку состояния позиции',RECOVERY_POSITION:'Ожидаю сверку состояния позиций',RECOVERY_PENDING:'Ожидание ордеров RECOVERY / сверки',RECOVERY_CLEANUP:'Очистка ордеров RECOVERY / сверка',V3_WAIT_ENTRY:'Ожидаю ручной ордер',V3_WAIT_CANDLE:'Ожидаю закрытие свечи',COOLDOWN:'Пауза перед новым циклом',PAUSED:'Новые входы остановлены',PAUSED_CYCLE:'Цикл приостановлен',MANUAL:'Требуется ручная сверка',SAFE_PAUSE:'Защитная пауза',MIGRATION_BLOCK:'Блокировка переноса состояния'};
-  const warnings=[];if(!v3Fresh)warnings.push('Нет свежего снимка: команды заблокированы.');
+  const dataAvailable=quoteCurrent();
+  // Generic data gaps are shown only as a neutral state; guards remain immediate.
+  const warnings=[];
   if(view.read_only)warnings.push('Только просмотр: торговые команды отключены');
   if(view.migration_block)warnings.push(friendlyReason(view.migration_block));if(view.manual_reason)warnings.push(friendlyReason(view.manual_reason));
   if(view.time_block)warnings.push(timeSafetyText());
-  if(view.feed?.status!=='FRESH'||!feedUtcVerified())warnings.push('Котировки или время не подтверждены как свежие.');
   write('bot-activity-warning',warnings.join(' · '));$('bot-activity-warning').dataset.tone='warning';$('bot-activity-state').dataset.tone='info';
   let detail=phases[view.phase]??('Состояние контроллера: '+(view.phase??'не указано'));
-  const safetyBlocked=!v3Fresh||view.feed?.status!=='FRESH'||!feedUtcVerified()||view.manual_reason||view.migration_block||view.time_block||['MANUAL','SAFE_PAUSE','MIGRATION_BLOCK'].includes(view.phase);
+  const safetyBlocked=!dataAvailable||view.manual_reason||view.migration_block||view.time_block||['MANUAL','SAFE_PAUSE','MIGRATION_BLOCK'].includes(view.phase);
   if(!safetyBlocked){if(view.positions?.length)detail='Ожидаю исполнения TP или SL';else if(view.orders?.length)detail='Ожидаю исполнения триггер ордера';}
-  else if(!v3Fresh)detail='';else detail='Действия приостановлены: требуется проверка';
+  else if(view.manual_reason||view.migration_block||view.time_block||!feedUtcVerified()||['MANUAL','SAFE_PAUSE','MIGRATION_BLOCK'].includes(view.phase))detail='Действия приостановлены: требуется проверка';
+  else detail=mode==='paper'&&paperServerReady?'Ожидание обновления; команды проверяет сервер':'Команды недоступны: ожидание данных';
   if(busy||pending)detail='Ожидаю подтверждения команды; повтор недоступен';
   if(view.v3_request)detail+=' · Запланирован '+view.v3_request.order_type+' по закрытию выбранной свечи';
   if(view.v3_link?.cancel)detail+=' · Отмена связанных триггеров ожидает сверки';
@@ -127,11 +139,13 @@
   const message={MT5_UTC_WAIT_FRESH_DATA:'ожидание свежего тика и M1.',MT5_UTC_WAIT_REFERENCE:'ожидание независимой проверки UTC.',MT5_UTC_CONTRACT_MISMATCH:'метки MT5 не соответствуют UTC; запустите read-only диагностику.',MT5_UTC_READ_TIMEOUT:'чтение MT5 заняло слишком долго.'}[reason]??'нужна повторная проверка времени.';
   return 'Время: '+message+(reason?' ['+reason+']':'')+' Блокировка сохранена; нажмите «Проверить время» для повторной проверки.';
  }
- let v3Fresh=false,snapshotDeadline=0,quoteDeadline=0;
+ let v3Fresh=false,paperServerReady=false,snapshotDeadline=0,quoteDeadline=0;
  const snapshotCurrent=()=>v3Fresh&&performance.now()<snapshotDeadline;
  const quoteCurrent=()=>snapshotCurrent()&&view?.feed?.status==='FRESH'&&feedUtcVerified()&&performance.now()<quoteDeadline;
  function acceptSnapshotFreshness(v,started){
   const f=v.snapshot_freshness,valid=f?.fresh===true&&typeof f.age_seconds==='number'&&Number.isFinite(f.age_seconds)&&f.age_seconds>=0&&typeof f.max_age_seconds==='number'&&Number.isFinite(f.max_age_seconds)&&f.max_age_seconds>0&&f.max_age_seconds<=2;
+  // Preserve server evidence separately from local round-trip/elapsed age.
+  paperServerReady=valid&&f.age_seconds<f.max_age_seconds&&v.feed?.status==='FRESH'&&v.feed?.timestamp_semantics==='VERIFIED'&&typeof v.feed.age_seconds==='number'&&Number.isFinite(v.feed.age_seconds)&&v.feed.age_seconds>=-2&&v.feed.age_seconds<5;
   snapshotDeadline=valid?started+Math.max(0,f.max_age_seconds-f.age_seconds)*1000:0;
   v3Fresh=valid&&performance.now()<snapshotDeadline;
   const age=v.feed?.age_seconds;
@@ -147,7 +161,7 @@
  function refreshState(){expireSnapshot();return poll();}
 
  const v3Enabled=()=>view?.recovery_mode==='V3';
- const v3Blocked=()=>!view||!quoteCurrent()||busy||!!pending||view.read_only||!!view.manual_reason||!!view.migration_block||!!view.time_block;
+ const v3Blocked=()=>!view||!(mode==='paper'?paperServerReady:quoteCurrent())||busy||!!pending||view.read_only||!!view.manual_reason||!!view.migration_block||!!view.time_block;
  function connectionLabel(){
   const status=view?.feed?.status,verified=feedUtcVerified(),fresh=quoteCurrent();
   const role=mode==='paper'?'PAPER':view?.read_only?'LIVE · READ ONLY':'LIVE';
@@ -243,7 +257,7 @@
   $('v3-link-toggle').disabled=blocked||!enabled||(linked?!canCancel:controls.can_link!==true);
   const link=view?.v3_link;
   $('v3-link-status').textContent=linked?(link.cancel?'Отмена запрошена; ожидается сверка MT5.':link.replace?'Перенос SL и связанных триггеров; ожидается сверка.':profileSummary(link.recovery_profile)+' · '+link.side+' STOP на '+link.price+'. Якорь — SL первой ступени.'):'Триггеры не выставлены. После выставления они связаны с SL первой ступени.';
-  $('v3-control-reason').textContent=!v3Fresh?'Нет свежего снимка. Действия заблокированы.':friendlyReason(controls.reason);
+  $('v3-control-reason').textContent=!v3Fresh?(mode==='paper'&&paperServerReady?'Свежесть данных проверяется сервером при выполнении команды.':'Ожидание данных сервера.'):friendlyReason(controls.reason);
   $('v3-cancel-entry').hidden=controls.can_cancel_entry!==true;
   $('v3-cancel-entry').disabled=blocked||!enabled||controls.can_cancel_entry!==true;
   $('v3-entry-distance').textContent='STOP: от Close выбранной свечи на '+(view?.v3_settings?.entry_distance??'—')+'. Объём и TP — по выбранному профилю.';
@@ -296,7 +310,7 @@
   $('close-'+name+'-panel').onclick=()=>{cancel();setSidePanel(name,false,true);};
  }
  $('save-v3-settings').onclick=async()=>{if(v3Blocked()||!v3Enabled())return;try{const distance=positiveDecimal($('v3-setting-distance').value,'Отступ'),revision=view.revision,scope=view.scope;if(!confirm('Сохранить отступ RECOVERY от Close: '+distance+'?'))return;await send({type:'v3_settings',cycle_id:view.cycle_id,entry_distance:distance},revision,scope);}catch(e){error(e.message);}};
- $('v3-submit-entry').onclick=async()=>{if(v3Blocked()||!v3Enabled()||view.v3_controls?.can_enter!==true||!view.selected_recovery_profile)return;try{const action={type:'v3_entry',cycle_id:view.cycle_id,order_type:$('v3-order-type').value,timing:$('v3-timing').value,side:$('v3-side').value},revision=view.revision,scope=view.scope;if(action.order_type==='STOP'&&action.timing==='now')throw Error('STOP выставляется только после текущей или следующей M1.');const timing=action.timing==='now'?'Сейчас':action.timing==='current'?'После закрытия текущей M1':'После закрытия следующей M1';if(action.order_type==='MARKET'&&!confirm((mode==='paper'?'СИМУЛЯТОР':'ТОРГОВЛЯ')+' — '+action.order_type+', '+profileDetails(view.selected_recovery_profile)+'\nSL: '+view.selected_recovery_profile.sl_distance+'\n'+timing+'\nНаправление: '+(action.timing==='now'?action.side:'по цвету свечи; doji — пропуск')+(action.order_type==='STOP'?'\nОтступ от Close: '+view.v3_settings.entry_distance:'\nЦена определяется рыночным исполнением')+'\nПосле исполнения бот сопровождает корзину.'))return;await send(action,revision,scope);}catch(e){error(e.message);}};
+ $('v3-submit-entry').onclick=async()=>{if(v3Blocked()||!v3Enabled()||view.v3_controls?.can_enter!==true||!view.selected_recovery_profile)return;try{const action={type:'v3_entry',cycle_id:view.cycle_id,order_type:$('v3-order-type').value,timing:$('v3-timing').value,side:$('v3-side').value},revision=view.revision,scope=view.scope;if(action.order_type==='STOP'&&action.timing==='now')throw Error('STOP выставляется только после текущей или следующей M1.');const timing=action.timing==='now'?'Сейчас':action.timing==='current'?'После закрытия текущей M1':'После закрытия следующей M1';if(action.order_type==='MARKET'&&!confirm((mode==='paper'?'СИМУЛЯТОР':'ТОРГОВЛЯ')+' — '+action.order_type+', '+profileDetails(view.selected_recovery_profile)+'\nSL: '+view.selected_recovery_profile.sl_distance+'\n'+timing+'\nНаправление: '+(action.timing==='now'?action.side:'по цвету свечи; doji — пропуск')+(action.order_type==='STOP'?'\nОтступ от Close: '+view.v3_settings.entry_distance:'\nЦена определяется свежей котировкой сервера в момент исполнения, а не показанной ранее ценой')+'\nПосле исполнения бот сопровождает корзину.'))return;await send(action,revision,scope);}catch(e){error(e.message);}};
  $('v3-cancel-request').onclick=async()=>{if(v3Blocked()||!v3Enabled()||!view.v3_request)return;const action={type:'v3_cancel_request',cycle_id:view.cycle_id},revision=view.revision,scope=view.scope;try{await send(action,revision,scope);}catch(e){error(e.message);}};
  $('v3-link-toggle').onclick=async()=>{if(v3Blocked()||!v3Enabled())return;try{const cancel=!!view.v3_link;if(cancel?view.v3_controls?.can_cancel_link!==true:view.v3_controls?.can_link!==true||!view.selected_recovery_profile)return;const action=cancel?{type:'v3_cancel_link',cycle_id:view.cycle_id}:{type:'v3_link',cycle_id:view.cycle_id,expected_positions:view.positions.map(p=>p.id).sort()},revision=view.revision,scope=view.scope;await send(action,revision,scope);}catch(e){error(e.message);}};
  $('v3-cancel-entry').onclick=async()=>{if(v3Blocked()||!v3Enabled()||view.v3_controls?.can_cancel_entry!==true)return;try{await send({type:'v3_cancel_entry',cycle_id:view.cycle_id},view.revision,view.scope);}catch(e){error(e.message);}};
@@ -453,7 +467,7 @@
   $('reverse-enable').title=view.reverse_controls?.reason??'';$('reverse-disable').title=view.reverse_controls?.reason??'';
   if(loadedScope!==view.scope){fields();loadedScope=view.scope;}v3Render();draw();
  }
- async function poll(){if(polling||busy)return;polling=true;pollTask=(async()=>{const started=performance.now();try{const r=await fetch(apiPath('state'),{headers:headers(),signal:AbortSignal.timeout(2500)});if(!r.ok){if([401,403].includes(r.status)){$('login').hidden=false;$('workspace').hidden=true;}throw Error('Нет авторизованного снимка');}const v=await r.json();if(v.contract!=='ticket_basket_v1'||(mode==='paper'?v.mode!=='PAPER':v.mode==='PAPER'))throw Error('Несовместимая версия контроллера');view=v;acceptSnapshotFreshness(v,started);const status=pending&&pendingScope===v.scope?v.action_results[pending]?.status:null;if(['APPLIED','REJECTED','CONFLICT'].includes(status)){lastActionReceipt={status,reason:v.action_results[pending]?.reason};clearPending();}$('login').hidden=true;$('workspace').hidden=false;render();}catch(e){v3Fresh=false;if(view){v3Render();connectionLabel();updateBotActivity();$('paper-interrupt').disabled=true;}$('feed-status').textContent='Нет свежего снимка';}finally{polling=false;}})();return pollTask;}
+ async function poll(){if(polling||busy)return;polling=true;pollTask=(async()=>{const started=performance.now();try{const r=await fetch(apiPath('state'),{headers:headers(),signal:AbortSignal.timeout(2500)});if(!r.ok){if([401,403].includes(r.status)){$('login').hidden=false;$('workspace').hidden=true;}throw Error('Нет авторизованного снимка');}const v=await r.json();if(v.contract!=='ticket_basket_v1'||(mode==='paper'?v.mode!=='PAPER':v.mode==='PAPER'))throw Error('Несовместимая версия контроллера');view=v;acceptSnapshotFreshness(v,started);const status=pending&&pendingScope===v.scope?v.action_results[pending]?.status:null;if(['APPLIED','REJECTED','CONFLICT'].includes(status)){lastActionReceipt={status,reason:v.action_results[pending]?.reason};clearPending();}$('login').hidden=true;$('workspace').hidden=false;render();}catch(e){v3Fresh=false;paperServerReady=false;if(view){v3Render();connectionLabel();updateBotActivity();$('paper-interrupt').disabled=true;}$('feed-status').textContent='Нет свежего снимка';}finally{polling=false;}})();return pollTask;}
  const defaultPrefs={mainTrend:false,mainCycle:true,pane:null,pattern:{trend:false,cycle:true},figure:{trend:false,cycle:true},liquidity:false,opacity:20,colors:{BUY:'#26a69a',SELL:'#ef5350',sl:'#ef5350',tp:'#26a69a',entry:'#e0b565',up:'#26a69a',down:'#ef5350',grid:'#25282e',zone:'#e0b565'}};
  let prefs=structuredClone(defaultPrefs);try{const saved=JSON.parse(localStorage.getItem('chart-preferences-v1')??'null');if(saved){for(const k of ['mainTrend','mainCycle','liquidity'])if(typeof saved[k]==='boolean')prefs[k]=saved[k];if(['pattern','figure',null].includes(saved.pane))prefs.pane=saved.pane;for(const pane of ['pattern','figure'])for(const k of ['trend','cycle'])if(typeof saved[pane]?.[k]==='boolean')prefs[pane][k]=saved[pane][k];if(Number.isFinite(saved.opacity))prefs.opacity=Math.max(0,Math.min(100,saved.opacity));for(const k of Object.keys(prefs.colors))if(/^#[0-9a-f]{6}$/i.test(saved.colors?.[k]))prefs.colors[k]=saved.colors[k];}}catch{}
  const savePrefs=()=>{localStorage.setItem('chart-preferences-v1',JSON.stringify(prefs));layout();draw();};

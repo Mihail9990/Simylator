@@ -23,6 +23,7 @@ jobs:
       - run: node tools/test_confirmed_start_unit.js
       - run: node tools/test_log_download_unit.js
       - run: node tools/test_snapshot_freshness_unit.js
+      - run: node tools/test_quote_gap_notice_unit.js
       - run: node tools/test_profile_quote_unit.js
       - run: node tools/test_paper_interrupt_unit.js
       - run: python tools/test_chart_layout_structure.py

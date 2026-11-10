@@ -54,6 +54,9 @@ def _run_paper(config, *, api=None, stop_event=None, clock=time.time,
         if stop_event is None:stop_event=stop_request(instance='paper')
         state.parent.mkdir(parents=True,exist_ok=True)
         resources.enter_context(owner_lock(str(state)+'.lock'))
+        from .runtime_logging import RuntimeLog
+        log_path=config.get('log_file') or str(state.with_suffix('.log'))
+        resources.enter_context(RuntimeLog(log_path))
         # No account execution lock, no live Store, no MT5Broker, no login.
         api=api if api is not None else importlib.import_module('MetaTrader5')
         resources.callback(api.shutdown)
@@ -61,7 +64,7 @@ def _run_paper(config, *, api=None, stop_event=None, clock=time.time,
         reader=(reader_factory or MarketReader)(api,symbol=config['symbol'],clock=clock,monotonic=monotonic,
             expected_account=str(login)+'@'+config['expected_server'],market_time_offset_seconds=market_offset)
         paper=PaperSession(state,reader,clock=clock,monotonic=monotonic)
-        paper.log_file=config.get("log_file")
+        paper.log_file=log_path
         resources.callback(paper.close)
         bind_state(state,instance='paper')
         panel=None

@@ -24,10 +24,35 @@ const accept=(v,start=now)=>{ctx.view=v;ctx.sample=v;ctx.started=start;run('acce
  ctx.busy=true;await run('poll()');assert.equal(calls,1,'busy send prevents poll overlap');ctx.busy=false;
  ctx.fetch=async()=>{calls++;const v=fresh();v.snapshot_freshness={fresh:false,age_seconds:3,max_age_seconds:2};return{ok:true,json:async()=>v};};
  await run('poll()');assert.equal(run('v3Fresh'),false,'HTTP200 cached snapshot does not revive freshness');
- const before=calls;await assert.rejects(run("send({type:'v3_entry'})"),/Нет свежего снимка/);assert.equal(calls,before,'stale guard sends no trade');
+ const before=calls;await assert.rejects(run("send({type:'v3_entry'})"),/Нет свежего снимка/);assert.equal(calls,before+1,'stale guard refreshes state only, sends no trade');
  // Safe emergency stop remains available, even while publication is stale.
  ctx.fetch=async url=>{calls++;return{ok:true,json:async()=>url.endsWith('action')?{status:'APPLIED'}:fresh()};};
- await run("send({type:'command',text:'/stop'})");assert.equal(calls,before+2);
+ await run("send({type:'command',text:'/stop'})");assert.equal(calls,before+3);
+ // PAPER accepts a slow but server-fresh response, never fabricates local freshness.
+ accept(fresh());run('v3Fresh=false');let slowPosts=0;
+ ctx.fetch=async url=>{if(url.endsWith('action')){slowPosts++;return{ok:true,json:async()=>({status:'APPLIED'})};}now+=2100;return{ok:true,json:async()=>fresh()};};
+ await run("send({type:'v3_settings',entry_distance:'1'})");
+ assert.equal(slowPosts,1);assert.equal(run('quoteCurrent()'),false);assert.equal(run('paperServerReady'),true);
+ // LIVE does not receive the PAPER-only relaxation.
+ ctx.mode='live';accept(fresh());run('v3Fresh=false');slowPosts=0;
+ await assert.rejects(run("send({type:'v3_settings'})"),/Нет свежего/);assert.equal(slowPosts,0);ctx.mode='paper';
+ // Modal/network gaps: one safe read can recover the same reviewed state.
+ accept(fresh());run('v3Fresh=false');let posts=0,gets=0;
+ ctx.fetch=async url=>{if(url.endsWith('action')){posts++;return{ok:true,json:async()=>({status:'APPLIED'})};}gets++;return{ok:true,json:async()=>fresh()};};
+ await run("send({type:'v3_settings',entry_distance:'1'})");
+ assert.equal(posts,1);assert.equal(gets,2,'preflight GET plus receipt reconciliation');
+ // A changed revision must not silently rebase what was confirmed.
+ accept(fresh());run('v3Fresh=false');posts=0;
+ ctx.fetch=async url=>{if(url.endsWith('action')){posts++;throw Error('unexpected POST');}return{ok:true,json:async()=>({...fresh(),revision:5})};};
+ await assert.rejects(run("send({type:'v3_settings'})"),/изменились/);assert.equal(posts,0);
+ // Offline GET cannot authorize a POST; an unknown POST is never retried.
+ accept(fresh());run('v3Fresh=false');posts=0;
+ ctx.fetch=async url=>{if(url.endsWith('action'))posts++;throw Error('offline');};
+ await assert.rejects(run("send({type:'v3_settings'})"),/Нет свежего/);assert.equal(posts,0);
+ accept(fresh());posts=0;
+ ctx.fetch=async url=>{if(url.endsWith('action')){posts++;throw Error('response lost');}return{ok:true,json:async()=>fresh()};};
+ await assert.rejects(run("send({type:'v3_settings'})"),/response lost/);assert.equal(posts,1);assert(ctx.pending);
+ await assert.rejects(run("send({type:'v3_settings'})"),/Повтор запрещён/);assert.equal(posts,1);
  assert(src.includes('setInterval(refreshState,500)'),'half-second cadence');
  console.log('PASS 500ms nonoverlap, monotonic publication/quote expiry, malformed/stale200 fail-closed, slow responses, no stale trade and emergency stop');
 })().catch(e=>{console.error(e);process.exitCode=1;});

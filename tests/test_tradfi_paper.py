@@ -233,6 +233,14 @@ class NativePaperIsolationTest(unittest.TestCase):
         self.api.login=forbidden
         with patch('tradfi.runtime.account_lock_path',side_effect=forbidden,create=True):
             _run_paper(config,api=self.api,panel_factory=Panel,reader_factory=lambda *a,**k:self.reader,stop_event=Stop(),clock=lambda:self.api.now,monotonic=lambda:self.api.now)
+        log_path=Path(self.tmp.name)/'paper.log'
+        from tradfi.log_export import build_document
+        self.assertEqual(observed[0].paper_session.log_file,str(log_path))
+        text=build_document(log_path)
+        self.assertIn(b'service_started',text)
+        self.assertIn(b'service_stopped',text)
+        self.assertIn(b'basket_start',text)
+        self.assertNotIn(b'111111111',text)
         self.assertFalse(self.writes)
         self.assertEqual(observed[0].authority,'127.0.0.1:8766')
         self.assertFalse((Path(self.tmp.name)/'live.db').exists())
