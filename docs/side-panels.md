@@ -1,44 +1,71 @@
-# Independent side panels
+# Chart controls and position history
 
-The SL controls slide from the left; manual order controls slide from the right.
-They open separately without expanding Commands or shrinking the chart. Close
-buttons and Escape dismiss one panel; switching to Settings closes both.
+Two compact arrow handles sit at the lower left edge near the chart and Commands.
+The upper handle controls SL; the lower controls manual orders. Both panels slide
+from the left independently, without shrinking the chart. Accessible names and
+tooltips identify them. Click/Enter/Space toggle; rightward drag of at least 36px
+opens, leftward drag closes. Short/vertical/cancelled gestures restore prior state.
+Synthetic clicks after dragging are suppressed. Escape, tab changes, modal preview,
+blur and resize safely interrupt gestures. Handles never invoke trading actions.
 
-Manual STOP and SL-linked trigger buttons submit the guarded request directly,
-without a preview confirmation. Current/next M1 scheduling still means the
-orders are placed only when that candle closes. MARKET entries and edits to
-existing protections retain confirmation.
+Manual STOP entry and linked-to-SL trigger buttons send guarded requests directly.
+Current/next M1 requests still wait for the selected candle. MARKET entries and
+protection edits retain confirmation. Linked-to-SL trigger placement, cancellation
+and status are in Commands. Cancellation only removes pending triggers; fills keep
+protection. Controller identity, revision, safety and duplicate-receipt guards remain.
 
-Cancel waiting candle, cancel placed manual triggers, and cancel SL-linked
-triggers are distinct actions. Cancelling triggers never closes filled positions.
-The controller records cancellation before dispatch, reconciles after restart,
-and preserves filled profile stages and their protection. UNKNOWN outcomes block
-retries pending reconciliation. Read-only, snapshot revision and cycle guards
-remain enforced.
+## Header
 
-Status colors: blue for information, green for a controller-accepted command
-(not proof of execution), amber for warnings, purple for uncertain/pending
-outcomes. The duplicated raw error banner is removed; readable safety warnings
-remain at the top, while exact controller codes remain in the Settings journal.
+RECOVERY is the remaining debt to cover, displayed as a negative amount in lime,
+zero when no debt remains. Currency remains UST, with no conversion or dollar sign.
+The other value is the net of fully closed positions across the complete saved
+execution history, including opening and closing commissions, swap and fees.
+Open-position costs are counted only when that position fully closes. Carried debt
+and recovery waivers are never P/L and cannot be added again to this total.
+Missing or contradictory legacy execution evidence makes the aggregate unavailable
+(—) with an explicit note. It is never a guessed total of the last 100 records.
 
-Validation: tools/run_offline_tests.py, tools/*unit.js and
- tools/test_chart_layout_structure.py. tools/test_side_panels_ui.js is an offline
-mocked Playwright test for 320/390/1280px widths, independent drawers,
-Escape/Settings, direct submit/cancel, notices and landscape. Chromium launch is
-blocked in the current execution environment by a socket permission restriction;
-browser geometry and touch behavior have not been verified here.
+## History
 
-## Header totals and History
+The middle History tab lists positions, not cycle IDs or accounting transfers.
+Each record shows BUY/SELL, observed opening/closing time and price, the actual
+TP/SL/manual/other reason, and net in UST. TP/SL labels do not imply the sign of net:
+a protected SL can be profitable, and fees can make a small TP net negative.
+Missing facts remain —. Open/partially closed positions have no final net yet.
+Trigger moves/cancellations and recovery writeoffs do not create position rows.
+PAPER derives these records from the full persisted exchange deal ledger; neither
+history rendering nor totals write to trading state.
 
-The fixed header shows total outstanding RECOVERY (lime digits) and the active
-cycle's booked net. Total RECOVERY is the existing cycle recovery or basket carry.
-Current cycle net sums confirmed ticket opening costs and closed ticket exit net,
-excluding inherited carry and unrealized floating P/L. Missing legacy ticket
-amounts or absence of an active cycle display as unknown (—), not fabricated zero.
+The old Paper Trading and Paper tickets/orders sections are removed. Resume after
+gap and flatten controls remain under Service controls; modeled costs remain in
+Trade parameters. The chart, persisted positions and exchange history are unchanged.
 
-History is the middle bottom tab. It contains the last 100 stored cycle summaries,
-existing paper executions, and existing writeoffs. Historical `realized` is labeled
-«Учёт с переносом» because it includes carried recovery; old records do not become
-reconstructed per-cycle returns. Backend projections are read-only. Tabs support
-left/right arrows; opening History closes side panels, and modal preview disables
-History interactions too. No historical timestamps or values are invented.
+## Notifications and verification
+
+Blue activity messages explicitly describe waiting for candle close, trigger fill,
+TP/SL, or a manual order. Fresh snapshots establish position/order waiting states;
+safety blocks or pending commands override readiness wording. Warnings and UNKNOWN
+outcomes remain visible and never become proof of execution.
+
+Run tools/run_offline_tests.py, tools/*unit.js and
+ tools/test_chart_layout_structure.py. The prepared Playwright suite uses mocked
+HTTP only. Chromium cannot create sockets in the current environment, including
+with approved escalation, so actual browser geometry/touch QA remains unverified.
+
+## Protection drag and flat RECOVERY reset
+
+Hold a TP/SL line still for a full 1000ms before moving it. Movement before that
+threshold navigates the chart normally. The scale is frozen for the staged drag;
+the chart shows the proposed line but no action is sent. Releasing shows a compact
+price/step/ticket confirmation with Confirm and Cancel. Cancelling, pointercancel,
+lost capture during drag, multitouch, blur or resize sends nothing. Confirmation
+checks fresh scope, cycle, revision and the same position/old levels before using
+the original guarded backend action. SL edits still affect the entire basket, as
+explicitly stated in the compact confirmation; TP edits target the chosen ticket.
+
+RECOVERY reset is refused while any position is open or an outcome is uncertain.
+When flat, it can preserve confirmed pending triggers and a validated scheduled
+candle, without cancellation, closing orders, or changing realized P/L. A persistent
+waiver offset prevents the old debt from returning; subsequent losses accrue again.
+Two fresh snapshots and closed-ticket evidence protect against fills/reconciliation
+races. PAPER interruption/manual reconciliation also respect the prior waiver.

@@ -164,7 +164,7 @@ class PaperSession:
             if any(cmd['status']=='UNKNOWN' and self.exchange.result(cid)['status']=='UNKNOWN' for cid,cmd in self.controller.state['commands'].items()):raise ActionRejected('Неизвестный исход сохранён')
             ids=set(c['entries']);pids={d['position_id'] for d in snap['deals'] if d['entry']=='IN' and d['command_id'] in ids}
             net=sum((sum((number(d[k]) for k in ('profit','commission','swap','fee')),D(0)) for d in snap['deals'] if d['position_id'] in pids),D(0))
-            s=self.controller.state;carry=max(D(0),number(s.get('basket_carry','0'))-net);s['basket_carry']=str(carry)
+            s=self.controller.state;carry=max(D(0),number(s.get('basket_carry','0'))-net-number(c.get('recovery_waived','0')));s['basket_carry']=str(carry)
             s['completed'].append(dict(id=c['id'],currency='UST',contract='ticket_basket_v1',recovery_retained=str(carry),completion='PAPER_MANUAL_RESET'))
             for cmd in s['commands'].values():
                 if cmd['status'] not in TERMINAL:cmd['status']='OBSOLETE'
@@ -195,6 +195,9 @@ class PaperSession:
         s=self.controller.state;c=s.get('cycle') or {};snap=deepcopy(self.snapshot) if self.snapshot else {}
         snap.update({k:deepcopy(self.exchange.p[k]) for k in ('orders','positions')})
         v=self.presentation.basket_view(s,c,snap,self.reader.view())
+        from .paper_position_history import position_history
+        history=position_history(self.exchange.p,s.get('currency'),bool(s.get('completed')),s.get('commands',{}))
+        v['position_history']=history['position_history'];v['metrics'].update(history['metrics'])
         v.update(mode='PAPER',source='PAPER_ON_MT5_READ_ONLY',paper=dict(paused_gap=self.exchange.p['paused_gap'],commission_per_lot_side=self.exchange.p['commission_per_lot_side'],cost_model='modeled commission per lot per side; swap/fee=0',history=deepcopy(self.exchange.p['deals'][-100:]),cursor=self.exchange.p['cursor'],last_interrupt=deepcopy(s.get('last_paper_interrupt'))))
         return v
     def close(self):self.store.close()

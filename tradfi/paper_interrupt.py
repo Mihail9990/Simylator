@@ -149,7 +149,9 @@ def interrupt_cycle(session, action):
         if carry_before < 0:
             raise ValueError('negative carry')
         realized = net - carry_before
-        carry = max(D(0), -realized)
+        waived = number(cycle.get('recovery_waived','0'))
+        if waived < 0:raise ValueError('negative waiver')
+        carry = max(D(0), -realized-waived)
     except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
         if isinstance(exc, ActionRejected):
             raise
@@ -162,7 +164,7 @@ def interrupt_cycle(session, action):
     settlement = dict(id=cycle['id'], currency=state['currency'], contract=cycle['contract'],
                       completion='PAPER_INTERRUPTED_RETAINED', cycle_net=str(net), realized=str(realized),
                       recovery_before=str(cycle['recovery']), carry_before=str(carry_before),
-                      recovery_retained=str(carry), written_off_recovery='0',
+                      recovery_retained=str(carry), written_off_recovery=str(waived),
                       at_utc=session.clock(), quote=deepcopy(snap['quote']),
                       closed_positions=sorted(action['expected_positions']), cancelled_orders=sorted(action['expected_orders']),
                       deal_ids=[d['id'] for d in cycle_deals], gap_confirmed=action['gap_confirmed'],
