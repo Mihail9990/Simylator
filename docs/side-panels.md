@@ -80,3 +80,6 @@ The Orders drawer uses compact two-column selectors and retains every placement/
 
 ### Half-second PAPER refresh and freshness deadlines
 The simulator browser requests state every 500 ms. A pending fetch or action prevents overlapping polls; this does not manufacture new MT5 ticks or guarantee network latency. HTTP 200 alone does not establish freshness: the browser requires a current publication-age envelope, subtracts request transit time, and independently expires the quote deadline. A timer and action-time guards prevent using a stalled cached snapshot. Safe emergency Stop and time re-verification remain available; new exposure and protection edits require fresh evidence. Source WAITING/unverified states are never promoted to fresh by polling.
+
+### Narrow vertical controls
+Following the annotated screenshots, drawers use a 104–132px left column: SL minus/value/plus and order selectors run top-to-bottom. Independent handles and guarded actions are unchanged; long descriptions stay expandable and the column scrolls. Height is bounded by the chart and lower controls. Blue informational notices are bold. The redundant latest-controller-journal paragraph is removed from notifications, while the Settings journal, current rejection/unknown receipts, stale-data warnings and explicit rejected-batch/linked-trigger safety reasons remain.
