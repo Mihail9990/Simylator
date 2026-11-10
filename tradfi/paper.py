@@ -130,6 +130,8 @@ class PaperSession:
             raise
         self.exchange=PaperExchange(self.store,clock=clock)
         self.controller=ControlledRecoveryController(self.store,self.exchange,clock=clock,monotonic=monotonic)
+        from .paper_interrupt import recover_receipts
+        recover_receipts(self)
         self.scope=self.exchange.account;self.gateway=ActionGateway(self.controller,execute=self.action);self.mailbox=OwnerMailbox();self.snapshot=None
         self.presentation=None
     def _fresh(self):
@@ -138,6 +140,9 @@ class PaperSession:
     def action(self,a):
         if not isinstance(a,dict):raise ActionRejected('Неверная бумажная команда')
         if self.controller.state.get('migration_block'):raise ActionRejected(self.controller.state['migration_block'])
+        if a.get('type')=='paper_interrupt':
+            from .paper_interrupt import interrupt_cycle
+            return interrupt_cycle(self,a)
         if a.get('type')=='paper_costs' and set(a)=={'type','commission_per_lot_side'}:
             try:value=number(a['commission_per_lot_side']);assert value>=0
             except (ValueError,AssertionError):raise ActionRejected('Нужна неотрицательная модель комиссии')
@@ -187,8 +192,9 @@ class PaperSession:
         from .web_control import PaperPresentation
         if self.presentation is None:
             self.presentation=object.__new__(PaperPresentation);self.presentation.controller=self.controller;self.presentation.scope=self.scope
-        s=self.controller.state;c=s.get('cycle') or {};snap=self.snapshot or {k:deepcopy(self.exchange.p[k]) for k in ('orders','positions')}
+        s=self.controller.state;c=s.get('cycle') or {};snap=deepcopy(self.snapshot) if self.snapshot else {}
+        snap.update({k:deepcopy(self.exchange.p[k]) for k in ('orders','positions')})
         v=self.presentation.basket_view(s,c,snap,self.reader.view())
-        v.update(mode='PAPER',source='PAPER_ON_MT5_READ_ONLY',paper=dict(paused_gap=self.exchange.p['paused_gap'],commission_per_lot_side=self.exchange.p['commission_per_lot_side'],cost_model='modeled commission per lot per side; swap/fee=0',history=deepcopy(self.exchange.p['deals'][-100:]),cursor=self.exchange.p['cursor']))
+        v.update(mode='PAPER',source='PAPER_ON_MT5_READ_ONLY',paper=dict(paused_gap=self.exchange.p['paused_gap'],commission_per_lot_side=self.exchange.p['commission_per_lot_side'],cost_model='modeled commission per lot per side; swap/fee=0',history=deepcopy(self.exchange.p['deals'][-100:]),cursor=self.exchange.p['cursor'],last_interrupt=deepcopy(s.get('last_paper_interrupt'))))
         return v
     def close(self):self.store.close()

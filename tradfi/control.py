@@ -70,6 +70,10 @@ class ActionGateway:
         if request['revision'] != revision:
             raise Conflict('State changed; refresh preview before Apply')
         receipt = dict(digest=digest, status='UNKNOWN', revision=revision+1)
+        if request['action'].get('type') == 'paper_interrupt' and state.get('backend') == 'paper_mt5_quotes_v1':
+            # This action commits its receipt with the entire virtual settlement.
+            # A crash immediately after reservation is therefore safe to reconcile.
+            receipt['paper_interrupt_atomic'] = True
         state.setdefault('control_receipts', {})[request['id']] = receipt
         state['control_revision'] = revision + 1
         self.controller.save('control_action_reserved')
