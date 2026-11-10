@@ -16,6 +16,7 @@ jobs:
       - run: node tools/test_v3_panel_unit.js
       - run: node tools/test_chart_height_unit.js
       - run: node tools/test_bot_activity_unit.js
+      - run: node tools/test_history_totals_unit.js
       - run: node tools/test_profile_quote_unit.js
       - run: node tools/test_paper_interrupt_unit.js
       - run: python tools/test_chart_layout_structure.py

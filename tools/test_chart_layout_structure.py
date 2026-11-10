@@ -18,8 +18,10 @@ p=Structure();p.feed((ROOT/'index.html').read_text());assert not p.stack
 inside=lambda key,ancestor:any(id==ancestor for _,id in p.nodes[key][2])
 for id in ('start','stop','resume','reset','logout','save-settings','refresh-settings','save-tp-grid','save-v3-settings','logs-refresh','logs-download','paper-save-cost','writeoff-recovery'):
     assert inside(id,'settings-page'),id
-for id in ('own-entry-sl','reverse-enable','reverse-disable','cancel-initial','v3-submit-entry','v3-cancel-request','v3-link-toggle','v3-sl-plus','v3-sl-minus','level-buttons'):
+for id in ('own-entry-sl','reverse-enable','reverse-disable','cancel-initial','level-buttons'):
     assert inside(id,'drawer-content'),id
+for id in ('v3-submit-entry','v3-cancel-request','v3-cancel-entry','v3-link-toggle','v3-sl-plus','v3-sl-minus'):
+    assert inside(id,'v3-panels') and not inside(id,'drawer-content'),id
 assert not inside('bot-activity','chart-page') and not inside('bot-activity','settings-page')
 assert p.nodes['bot-activity'][1]['tabindex']=='0'
 assert not inside('chart-notices','chart-page') and not inside('chart-notices','settings-page')
@@ -30,10 +32,13 @@ assert inside('chart','chart-page') and inside('preview','chart-page')
 assert not inside('bottom-tabs','chart-page') and not inside('bottom-tabs','settings-page')
 assert 'hidden' in p.nodes['settings-page'][1] and 'hidden' in p.nodes['drawer-content'][1]
 assert p.nodes['drawer-toggle'][1]['aria-controls']=='drawer-content'
-for tab in ('chart','settings'):assert p.nodes['tab-'+tab][1]['aria-controls']==tab+'-page'
+for tab in ('chart','history','settings'):assert p.nodes['tab-'+tab][1]['aria-controls']==tab+'-page'
 js=(ROOT/'panel.js').read_text()
 for id in re.findall(r"\$\('([^']+)'\)",js):
     if id.endswith('-'):continue
     assert id in p.nodes,id
 assert "const mode='paper';" in js and 'switchMode' not in js
 print('PASS static chart-first structure, command reachability, IDs, tabs, separate role contract. Browser layout NOT verified.')
+
+for id in ('paper-deals','writeoff-history','cycle-history-rows'):assert inside(id,'history-page') and not inside(id,'settings-page'),id
+assert inside('activity-recovery','bot-activity') and inside('activity-cycle-net','bot-activity')
