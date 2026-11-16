@@ -176,6 +176,8 @@ class PaperSession:
         self.controller=SimulationController(self.store,self.exchange,clock=clock,monotonic=monotonic)
         from .paper_interrupt import recover_receipts
         recover_receipts(self)
+        from .paper_total_counter import recover_receipts as recover_total_receipts
+        recover_total_receipts(self)
         from .paper_commands import PaperCommandMailbox
         self.scope=self.exchange.account;self.gateway=ActionGateway(self.controller,execute=self.action);self.mailbox=PaperCommandMailbox(monotonic=monotonic,max_age_seconds=2,current_execution_view=self._execution_view,max_queue_age_seconds=3);self._execution_started=None;self._execution_ok=False;self.snapshot=None
         self.presentation=None
@@ -205,6 +207,9 @@ class PaperSession:
     def action(self,a):
         if self.capture_failure:
             raise ActionRejected(self.capture_failure, public_message='Получение котировок остановлено: '+self.capture_failure+'. Симуляция не продолжается с пропущенными данными. Проверьте журнал и перезапустите сервис; история и долг сохранены.')
+        if isinstance(a,dict) and a.get('type')=='paper_reset_total':
+            from .paper_total_counter import reset_total
+            return reset_total(self,a)
         from .paper_commands import command_scope, advance_command, cancel_without_quote
         with command_scope(self,a):
             if cancel_without_quote(self,a):return
@@ -343,7 +348,8 @@ class PaperSession:
         history_started=time.perf_counter()
         history=self._history_cache.view(self.exchange.p,s.get('currency'),bool(s.get('completed')),s.get('commands',{}))
         self._view_performance['history_ms']=self._view_performance.get('history_ms',0)+(time.perf_counter()-history_started)*1000
-        v['position_history']=history['position_history'];v['metrics'].update(history['metrics'])
+        from .paper_total_counter import counter_metrics
+        v['position_history']=history['position_history'];v['metrics'].update(counter_metrics(history['metrics'],s))
         v['position_history_revision']=f'{self._history_cache.generation}:{self._history_cache.rebuilds}'
         v.update(mode='PAPER',source='PAPER_ON_MT5_READ_ONLY',paper=dict(paused_gap=self.exchange.p['paused_gap'],commission_per_lot_side=self.exchange.p['commission_per_lot_side'],cost_model='modeled commission per lot per side; swap/fee=0',history=deepcopy(self.exchange.p['deals'][-100:]),cursor=self.exchange.p['cursor'],last_interrupt=deepcopy(s.get('last_paper_interrupt'))))
         if self.capture_failure:

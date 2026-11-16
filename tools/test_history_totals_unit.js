@@ -3,7 +3,7 @@ const fs=require('fs'),path=require('path'),vm=require('vm'),assert=require('ass
 const root=path.join(__dirname,'../web/basket-panel'),src=fs.readFileSync(path.join(root,'panel.js'),'utf8'),html=fs.readFileSync(path.join(root,'index.html'),'utf8'),css=fs.readFileSync(path.join(root,'panel.css'),'utf8');
 const nodes={};class Element{constructor(){this.textContent='';this.dataset={};this.children=[];this.events={};this.attributes={};}append(x){this.children.push(x);}replaceChildren(){this.children=[];}setAttribute(k,v){this.attributes[k]=v;}addEventListener(k,v){this.events[k]=v;}focus(){}}
 const $=id=>nodes[id]??=new Element();
-const ctx=vm.createContext({$,view:null,document:{createElement:()=>new Element()},notice:(id,text,tone)=>{const e=$(id);e.textContent=text;e.dataset.tone=tone;},preview:null,cancelGesture:()=>{},cancelSidePanelDrags:()=>{},sidePanelOrder:[],setSidePanel:()=>{},requestAnimationFrame:()=>{},draw:()=>{}});
+const ctx=vm.createContext({$,view:null,mode:'paper',busy:false,pending:null,document:{createElement:()=>new Element()},notice:(id,text,tone)=>{const e=$(id);e.textContent=text;e.dataset.tone=tone;},preview:null,cancelGesture:()=>{},cancelSidePanelDrags:()=>{},sidePanelOrder:[],setSidePanel:()=>{},requestAnimationFrame:()=>{},draw:()=>{}});
 vm.runInContext(src.slice(src.indexOf(' function renderTotalsHistory(){'),src.indexOf(' function render(){')),ctx);
 const run=()=>vm.runInContext('renderTotalsHistory()',ctx);
 run();assert.equal($('activity-recovery').textContent,'—');assert.equal($('activity-total-net').textContent,'—');assert($('position-history-empty').textContent.includes('пока нет'));
@@ -14,6 +14,7 @@ const card=$('position-history-list').children[0];assert.equal(card.children[0].
 ctx.view.metrics.recovery_total='0.000';ctx.view.metrics.all_closed_net='0';run();assert.equal($('activity-recovery').textContent,'0 UST');assert.equal($('activity-total-net').textContent,'0 UST');
 assert.equal($('activity-total-net').dataset.tone,'success');
 ctx.view.metrics.all_closed_net='1.25';run();assert.equal($('activity-total-net').dataset.tone,'success');
+ctx.view.metrics.total_reset_note='Saved baseline needs checking';run();assert.equal($('activity-totals-note').hidden,false);assert.equal($('activity-totals-note').textContent,'Saved baseline needs checking');delete ctx.view.metrics.total_reset_note;
 ctx.view.metrics.all_closed_net=null;ctx.view.metrics.history_complete=false;ctx.view.metrics.history_note='Missing opening evidence';run();assert.equal($('activity-total-net').textContent,'—');assert.equal($('position-history-note').textContent,'Missing opening evidence');
 assert.equal($('activity-totals-note').hidden,false);assert($('activity-totals-note').textContent.includes('история исполнений неполна'));
 ctx.view={debt:'999',realized:'999',position_history:[{side:'BUY',status:'open',net:null}]};run();assert.equal($('activity-recovery').textContent,'—','no invented fallback');assert.equal($('position-history-list').children[0].children.at(-1).textContent,'Итог после закрытия · —');

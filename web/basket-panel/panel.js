@@ -178,7 +178,7 @@
  const snapshotCurrent=()=>v3Fresh&&performance.now()<snapshotDeadline;
  const quoteCurrent=()=>snapshotCurrent()&&(view?.feed?.timestamp_semantics==='BROKER_RAW'?view?.feed?.status==='OBSERVED':view?.feed?.status==='FRESH'&&feedUtcVerified()&&performance.now()<quoteDeadline);
  // PAPER commands use only the last verified MT5 quote, never a fabricated price.
- const paperPriceFree=action=>(action?.type==='command'&&['/stop','/resume_time','/sync_mt5_time'].includes(action.text))||['cancel_initial','v3_cancel_entry','v3_cancel_link','v3_cancel_request','paper_costs','overlap_thresholds','candle_recovery_settings','candle_recovery_resume'].includes(action?.type);
+ const paperPriceFree=action=>(action?.type==='command'&&['/stop','/resume_time','/sync_mt5_time'].includes(action.text))||['cancel_initial','v3_cancel_entry','v3_cancel_link','v3_cancel_request','paper_costs','paper_reset_total','overlap_thresholds','candle_recovery_settings','candle_recovery_resume'].includes(action?.type);
  function paperQuoteAvailable(q=view?.paper?.command_quote){
   return q?.available===true&&['LAST_VERIFIED_MT5','LAST_OBSERVED_MT5'].includes(q.source)&&[q.bid,q.ask].every(x=>['string','number'].includes(typeof x)&&x!==''&&Number.isFinite(Number(x))&&Number(x)>0)&&Number(q.ask)>=Number(q.bid)&&typeof q.timestamp==='number'&&Number.isFinite(q.timestamp)&&q.timestamp>0&&Number.isFinite(new Date(q.timestamp*1000).getTime())&&(q.source==='LAST_OBSERVED_MT5'||(typeof q.age_seconds==='number'&&Number.isFinite(q.age_seconds)&&q.age_seconds>=-2));
  }
@@ -493,6 +493,7 @@
  $('apply-level').onclick=async()=>{if(!preview||preview.dragging)return;const p=preview;if(v3Blocked()||view.scope!==p.backend.scope||view.cycle_id!==p.backend.cycle_id||view.revision!==p.backend.revision){error('Данные изменились или недоступны. Отмените правку и выберите линию заново.');return;}if(p.line.pid&&JSON.stringify(view.positions.map(x=>x.id).sort())!==JSON.stringify(p.backend.positions.map(x=>x.id).sort())){error('Состав позиций изменился. Отмените правку и выберите линию заново.');return;}if(p.line.pid){const current=view.positions.find(x=>x.id===p.line.pid),original=p.backend.positions.find(x=>x.id===p.line.pid);if(!current||!original||String(current.sl)!==String(original.sl)||String(current.tp)!==String(original.tp)){error('Позиция или её уровни изменились. Отмените правку и выберите линию заново.');return;}}const value=Number($('new-price').value);if(!Number.isFinite(value)||value<=0){error('Цена должна быть положительным числом.');return;}let action;if(p.line.kind==='trigger'){action={type:'basket_levels',cycle_id:p.backend.cycle_id,expected_orders:p.backend.orders.map(o=>o.id),expected:p.backend.levels,levels:{...p.backend.levels,[p.line.side]:String(value)}};}else{const position=p.backend.positions.find(x=>x.id===p.line.pid);action={type:'protection',cycle_id:p.backend.cycle_id,position_id:position.id,old:{sl:position.sl,tp:position.tp},new:{sl:position.sl,tp:position.tp,[p.line.kind]:String(value)}};}try{await send(action,p.backend.revision,p.backend.scope);preview=null;$('preview').hidden=true;}catch(e){error(e.message);}draw();};
  $('new-price').oninput=()=>{if(!preview||preview.dragging)return;const value=Number($('new-price').value);if(!Number.isFinite(value)||value<=0)return;preview.value=value;$('preview-text').textContent=preview.line.label+': '+preview.line.price.toFixed(2)+' → '+value.toFixed(2);draw();};
  function renderTotalsHistory(){
+  renderTotalReset();
   const metrics=view?.metrics;
   const money=(value,currency)=>value===null||value===undefined||value===''?'—':String(value)+(currency?' '+currency:'');
   const debt=metrics?.recovery_total;
@@ -500,8 +501,8 @@
   notice('activity-recovery',money(negative,metrics?.currency),'info');
   const total=metrics?.all_closed_net;
   notice('activity-total-net',money(total,metrics?.currency),total===null||total===undefined?'info':Number(total)<0?'loss':'success');
-  $('activity-totals-note').textContent=metrics?.history_complete===true?'':'Общий результат недоступен: история исполнений неполна.';
-  $('activity-totals-note').hidden=metrics?.history_complete===true;
+  $('activity-totals-note').textContent=metrics?.total_reset_note||(metrics?.history_complete===true?'':'Общий результат недоступен: история исполнений неполна.');
+  $('activity-totals-note').hidden=!$('activity-totals-note').textContent;
   const records=Array.isArray(view?.position_history)?view.position_history:[];
   $('position-history-note').textContent=metrics?.history_note??(metrics?.history_complete===true?'':'Нет подтверждённой полной истории.');
   $('position-history-empty').textContent=records.length?'':'Исполненных позиций пока нет.';
@@ -521,6 +522,22 @@
    $('position-history-list').append(card);
   }
  }
+ // Display-only total reset: deliberately independent of RECOVERY/manual state.
+ function totalResetSupported(){return mode==='paper'&&view?.candle_recovery?.variant==='sl-overlap-recovery-v1';}
+ function totalResetBlocked(){const total=view?.metrics?.all_closed_net;return !totalResetSupported()||busy||!!pending||view.read_only||!!view.migration_block||view.metrics?.total_reset_available!==true||view.metrics?.history_complete!==true||!['string','number'].includes(typeof total)||total===''||!Number.isFinite(Number(total));}
+ function renderTotalReset(){
+  const supported=totalResetSupported();$('paper-reset-total').hidden=!supported;$('paper-reset-total').disabled=totalResetBlocked();
+  const at=view?.metrics?.total_reset_at,date=typeof at==='number'&&Number.isFinite(at)&&at>0?new Date(at*1000):null;
+  $('total-reset-note').hidden=!supported||!date||!Number.isFinite(date.getTime());
+  $('total-reset-note').textContent=$('total-reset-note').hidden?'':'После сброса: '+date.toISOString().replace('T',' ').replace('.000Z',' UTC');
+ }
+ $('paper-reset-total').onclick=async()=>{
+  if(totalResetBlocked())return;
+  const revision=view.revision,scope=view.scope;
+  if(!confirm('Обнулить только отображаемый общий результат?\nСчётчик начнёт отсчёт заново и сохранится после перезапуска. RECOVERY, история сделок, открытые позиции и ордера не изменятся.'))return;
+  if(totalResetBlocked()||revision!==view.revision||scope!==view.scope){error('Состояние изменилось. Проверьте общий результат и подтвердите сброс заново.');return;}
+  try{await send({type:'paper_reset_total',confirmed:true},revision,scope);}catch(e){error(e.message);}
+ };
  function render(){
   renderMt5TimeControls();renderTotalsHistory();
   connectionLabel();updateBotActivity();

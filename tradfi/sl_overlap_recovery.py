@@ -267,16 +267,46 @@ class SLOverlapRecoveryController(CandleRecoveryController):
             c['manual_required'] = True; self.state['phase'] = 'V3_WAIT_ENTRY'; return
         self._support_reentry(snap)
         self._sync_ladders(snap)
+        if not c.get('recovery_follow') and not snap['orders'] and not self._unresolved():
+            self._follow_closed_gap(snap)
+        if c.get('recovery_follow'):
+            self.state['phase'] = 'RECOVERY_WAIT'
+            self._follow_recovery(snap); return
         if c['tickets'] and (c.get('v3_link') or snap['orders'] or self._unresolved()):
             self.state['phase'] = 'RECOVERY_PENDING'; return
-        if c.get('recovery_follow'):
-            # Explicit manual continuation only, never automatic candle recovery.
-            self._follow_recovery(snap); return
         if c['tickets']:
             c['manual_required'] = True
             c.setdefault('overlap_wait_reason', 'Нет встречных ордеров: выберите профиль продолжения вручную')
             self.state['phase'] = 'V3_WAIT_ENTRY'; return
         BasketController._step(self, snap)
+
+    def _follow_closed_gap(self, snap):
+        """Resume only a fully observed fill+close with no reverse ever created.
+
+        A disabled reverse is an owner's cancellation, not a gap fallback. The
+        latest filled group owns this decision so older groups cannot restart a
+        later manually cancelled basket. Retain a durable one-shot marker.
+        """
+        c = self.state['cycle']
+        groups = [(g, [t for t in c['tickets'].values() if t['group'] == g['id']])
+                  for g in c['groups']]
+        filled = [(g, tickets) for g, tickets in groups if tickets]
+        if not filled:
+            return
+        g, tickets = filled[-1]
+        if (g.get('gap_follow_started') or g['id'] + ':reverse' in c.get('overlap_ladders', {})
+                or len(tickets) != len(g['commands']) or any(not t['closed'] for t in tickets)
+                or not self._resolved(g['commands'])):
+            return
+        profile = self._desired_profile(snap, number(c['recovery']))
+        if profile is None:
+            return
+        g['gap_follow_started'] = True
+        c.update(recovery_follow=True, follow_after=snap['candle']['id'],
+                 follow_volume=profile['total_volume'], follow_profile=deepcopy(profile),
+                 manual_required=False)
+        c.pop('overlap_wait_reason', None)
+        self.save('overlap_closed_gap_candle_follow')
 
     def _threshold(self, debt):
         thresholds = self.state['overlap_thresholds']
@@ -339,6 +369,11 @@ class SLOverlapRecoveryController(CandleRecoveryController):
             self.save('overlap_thresholds_updated')
             return
         result = super().action(a)
+        if a.get('type') == 'v3_cancel_entry' and self.state.get('cycle'):
+            # An accepted owner cancellation also cancels candle continuation.
+            self.state['cycle'].pop('recovery_follow', None)
+            self.state['cycle'].pop('follow_profile', None)
+            self.save('overlap_candle_follow_cancelled')
         if a.get('type') == 'candle_recovery_resume':
             self.state['cycle']['overlap_manual_resume'] = True
             self.save('overlap_manual_continuation')

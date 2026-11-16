@@ -52,11 +52,12 @@ class OverlapTests(unittest.TestCase):
     def test_foreign_variant_database_rejected(self):
         self.bot.state.pop('simulator_variant');self.bot.save('foreign')
         with self.assertRaises(DurabilityError):SLOverlapRecoveryController(self.store,self.b)
-    def test_closed_gap_group_no_market_replacement(self):
+    def test_closed_gap_group_follows_candles_without_market_replacement(self):
         self.start();self.b.close('SL')
         for _ in range(3):self.b.fill('SELL')
         for p in list(self.b.data['positions']):self.b.close('SL',position_id=p['id'])
-        self.tick();self.assertFalse(self.b.data['orders']);self.assertTrue(self.bot.state['cycle']['manual_required'])
+        self.tick();self.assertFalse(self.b.data['orders']);self.assertFalse(self.bot.state['cycle']['manual_required'])
+        self.assertTrue(self.bot.state['cycle']['recovery_follow'])
         self.assertEqual(D(self.bot.state['cycle']['recovery']),D('5'))
     def test_threshold_edits_reprofile_pending_without_moving_price(self):
         p=self.start();before=deepcopy(self.b.data['orders']);c=self.bot.state['cycle']

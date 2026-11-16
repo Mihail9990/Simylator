@@ -124,7 +124,7 @@ def cancel_without_quote(session, action):
         fields={'type','cycle_id','expected_orders'} if kind=='cancel_initial' else {'type','cycle_id'}
         if set(action)!=fields or not c or action['cycle_id']!=c['id']:reject('Цикл изменился; обновите панель.')
         if c.get('edit') or c.get('v3_edit') or c.get('v3_rearm') or c.get('initial_cancel') or c.get('manual'):reject('Сначала сверка предыдущей операции.')
-    ids=set()
+    ids=set();overlap_cancel_groups=set()
     if stop:
         state['stop']=True;state['stop_mode']='FINISH' if c and c.get('tickets') else 'CANCEL'
         ids=set(c['entries']) if c else set()
@@ -142,9 +142,23 @@ def cancel_without_quote(session, action):
     elif kind=='v3_cancel_link':
         if not c.get('v3_link'):reject('Нет связанных триггеров.')
         ids=set(c['v3_link']['ids']);c['v3_link']['cancel']=True
+        if state.get('simulator_variant')=='sl-overlap-recovery-v1':
+            for link in c.get('overlap_ladders',{}).values():
+                if link.get('group')==c['v3_link']['group']:
+                    link['disabled']=True
     else:
         groups=bot._cancel_entry_groups({'orders':paper['orders']},c)
-        if not groups:reject('Нет ожидающих ручных триггеров.')
+        logical=[]
+        if state.get('simulator_variant')=='sl-overlap-recovery-v1':
+            logical=[link for link in c.get('overlap_ladders',{}).values()
+                     if not link.get('filled') and not link.get('disabled')]
+            for link in logical:
+                link['disabled']=True
+                if link.get('group'):overlap_cancel_groups.add(link['group'])
+            groups=groups+[g for g in c['groups'] if g['id'] in overlap_cancel_groups and g not in groups]
+            if c.get('v3_link') and c['v3_link']['group'] in overlap_cancel_groups:
+                c['v3_link']['cancel']=True
+        if not groups and not logical:reject('Нет ожидающих ручных триггеров.')
         ids={cid for g in groups for cid in g['commands']}
     # Command UNKNOWN may represent a send. Never relabel it as a cancelled
     # unfilled order based solely on absence; only concrete local orders count.
@@ -163,8 +177,16 @@ def cancel_without_quote(session, action):
         c['wait_for_signal']=True;state['phase']='INITIAL_WAIT'
         state['last_candle']=max(state['last_candle'],int(number(session.clock())//60)*60-60)
     elif kind=='v3_cancel_entry':
+        if state.get('simulator_variant')=='sl-overlap-recovery-v1':
+            c.pop('recovery_follow',None)
+            c.pop('follow_profile',None)
         for g in c['groups']:
             if not set(g['commands'])&ids:continue
+            if g['id'] in overlap_cancel_groups:
+                # Preserve original membership for fill/cancel reconciliation.
+                # A trigger cancellation never removes an already filled leg.
+                if all(state['commands'][cid]['status']=='CANCELLED' for cid in g['commands']):g['retired']=True
+                continue
             g['commands']=[cid for cid in g['commands'] if state['commands'][cid]['status']!='CANCELLED']
             g['v3_count']=len(g['commands'])
             if not g['commands']:g['retired']=True

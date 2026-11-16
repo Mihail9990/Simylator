@@ -98,6 +98,8 @@ class ActionGateway:
             # This action commits its receipt with the entire virtual settlement.
             # A crash immediately after reservation is therefore safe to reconcile.
             receipt['paper_interrupt_atomic'] = True
+        if request['action'].get('type') == 'paper_reset_total' and state.get('backend') == 'paper_mt5_quotes_v1' and state.get('simulator_variant') == 'sl-overlap-recovery-v1':
+            receipt['paper_total_reset_atomic'] = True
         state.setdefault('control_receipts', {})[request['id']] = receipt
         state['control_revision'] = revision + 1
         reservation_started = time.perf_counter()

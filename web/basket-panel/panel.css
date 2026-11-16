@@ -182,3 +182,8 @@ body{background:var(--bg)}main{padding:0;max-width:none}#login{max-width:480px;m
 #bot-activity #bot-activity-state,#bot-activity p[data-tone=info]{color:#83c3ff;font-weight:700}
 
 .overlap-threshold-row{display:grid;grid-template-columns:minmax(100px,1fr) minmax(0,2fr);gap:8px;margin:10px 0}.overlap-threshold-row input,.overlap-threshold-row select{width:100%;min-width:0;box-sizing:border-box}
+
+/* Reset affects only the displayed total, not RECOVERY or execution history. */
+.total-counter-heading{display:flex;align-items:center;justify-content:space-between;gap:5px}
+#activity-totals #paper-reset-total{font-size:10px;line-height:1.1;padding:3px 6px;min-height:24px;flex:0 0 auto;margin:0}
+#activity-totals #total-reset-note{font-size:9px;color:#9db1c6;margin-top:2px}
