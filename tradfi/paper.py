@@ -178,6 +178,8 @@ class PaperSession:
         recover_receipts(self)
         from .paper_total_counter import recover_receipts as recover_total_receipts
         recover_total_receipts(self)
+        from .paper_cycle_reset import recover_receipts as recover_cycle_reset_receipts
+        recover_cycle_reset_receipts(self)
         from .paper_commands import PaperCommandMailbox
         self.scope=self.exchange.account;self.gateway=ActionGateway(self.controller,execute=self.action);self.mailbox=PaperCommandMailbox(monotonic=monotonic,max_age_seconds=2,current_execution_view=self._execution_view,max_queue_age_seconds=3);self._execution_started=None;self._execution_ok=False;self.snapshot=None
         self.presentation=None
@@ -205,6 +207,9 @@ class PaperSession:
         self._last_publication=time.perf_counter()
 
     def action(self,a):
+        if a=={'type':'paper_reset_cycle'}:
+            from .paper_cycle_reset import reset_cycle
+            return reset_cycle(self,a)
         if self.capture_failure:
             raise ActionRejected(self.capture_failure, public_message='Получение котировок остановлено: '+self.capture_failure+'. Симуляция не продолжается с пропущенными данными. Проверьте журнал и перезапустите сервис; история и долг сохранены.')
         if isinstance(a,dict) and a.get('type')=='paper_reset_total':
@@ -278,6 +283,9 @@ class PaperSession:
         return view
 
     def step(self):
+        if self.mailbox.drain_reset(self.gateway,self.view):
+            self._last_publication=time.perf_counter()
+            return
         if self.capture_failure:
             # Keep the diagnostic panel reachable, but never process another
             # market sample or execute a queued strategy action after a gap.
@@ -292,11 +300,18 @@ class PaperSession:
         self.exchange.performance={};self._view_performance={}
         try:
             before=time.perf_counter(); market=self.reader.read(); marks['read_ms']=(time.perf_counter()-before)*1000
-            before=time.perf_counter(); self.exchange.observe(market); marks['observe_ms']=(time.perf_counter()-before)*1000
-            before=time.perf_counter()
-            self.controller.tick()
-            marks['tick_ms']=(time.perf_counter()-before)*1000
-            self.snapshot=self.exchange.snapshot(include_history=False)
+            captured=market.get('capture',{}).get('observed_monotonic')
+            cutoff=getattr(self,'_paper_reset_capture_cutoff',None)
+            superseded=cutoff is not None and captured is not None and captured<=cutoff
+            if not superseded:
+                before=time.perf_counter(); self.exchange.observe(market); marks['observe_ms']=(time.perf_counter()-before)*1000
+                before=time.perf_counter()
+                self.controller.tick()
+                marks['tick_ms']=(time.perf_counter()-before)*1000
+                self.snapshot=self.exchange.snapshot(include_history=False)
+            # Reset supersedes old captured prices, not newly received commands.
+            # An unchanged source can repeat its last sample indefinitely; keep
+            # acknowledgement, receipt watermark and command publication alive.
             acknowledge=getattr(self.reader,'acknowledge',None)
             if acknowledge is not None:acknowledge()
             self._execution_ok=True
@@ -351,7 +366,7 @@ class PaperSession:
         from .paper_total_counter import counter_metrics
         v['position_history']=history['position_history'];v['metrics'].update(counter_metrics(history['metrics'],s))
         v['position_history_revision']=f'{self._history_cache.generation}:{self._history_cache.rebuilds}'
-        v.update(mode='PAPER',source='PAPER_ON_MT5_READ_ONLY',paper=dict(paused_gap=self.exchange.p['paused_gap'],commission_per_lot_side=self.exchange.p['commission_per_lot_side'],cost_model='modeled commission per lot per side; swap/fee=0',history=deepcopy(self.exchange.p['deals'][-100:]),cursor=self.exchange.p['cursor'],last_interrupt=deepcopy(s.get('last_paper_interrupt'))))
+        v.update(mode='PAPER',source='PAPER_ON_MT5_READ_ONLY',paper=dict(paused_gap=self.exchange.p['paused_gap'],commission_per_lot_side=self.exchange.p['commission_per_lot_side'],cost_model='modeled commission per lot per side; swap/fee=0',history=deepcopy(self.exchange.p['deals'][-100:]),cursor=self.exchange.p['cursor'],last_interrupt=deepcopy(s.get('last_paper_interrupt')),last_reset=deepcopy(s.get('last_paper_reset'))))
         if self.capture_failure:
             v['read_only']=True
             v['feed'].update(status='ERROR',reason=self.capture_failure)

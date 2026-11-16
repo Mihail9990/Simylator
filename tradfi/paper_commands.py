@@ -1,7 +1,9 @@
 """Explicit PAPER command execution on the last verified quote, never feed replay."""
 from copy import deepcopy
 from contextlib import contextmanager
-from .control import OwnerMailbox, SnapshotStale, ActionRejected
+from .control import OwnerMailbox, SnapshotStale, ActionRejected, Conflict, validate_request, _request_digest, is_overlap_cycle_reset
+import queue
+import threading
 from .settings import number
 
 
@@ -10,6 +12,72 @@ def reject(message):
 
 
 class PaperCommandMailbox(OwnerMailbox):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._cycle_resets = queue.Queue(maxsize=32)
+        self._reset_generation = 0
+
+    def _submission_preview(self, preview):
+        # Captured under the same mailbox lock as insertion. Requests arriving
+        # while reset commits still belong to the old generation.
+        return (*preview, self._reset_generation) if preview is not None else preview
+
+    def submit(self, request):
+        request = validate_request(request)
+        if request['action'] != {'type':'paper_reset_cycle'}:
+            return super().submit(request)
+        with self.lock:
+            if (self._view.get('mode') != 'PAPER' or
+                (self._view.get('candle_recovery') or {}).get('variant') != 'sl-overlap-recovery-v1'):
+                raise ActionRejected('Сброс цикла доступен только overlap PAPER.')
+            previous=self._receipts.get(request['id'])
+            if previous:
+                if previous['digest'] != _request_digest(request):raise Conflict('Action id reused with different payload')
+                if previous.get('status')!='UNKNOWN':return dict(id=request['id'], **{k:previous[k] for k in ('status','revision')})
+            with self._cycle_resets.mutex:
+                if any(item['id']==request['id'] for item in self._cycle_resets.queue):return {'id':request['id'],'status':'QUEUED'}
+            self._cycle_resets.put_nowait(request)
+        return {'id':request['id'],'status':'QUEUED'}
+
+    def drain_reset(self, gateway, view_factory):
+        """Run at owner step entry, before quote acquisition or strategy work."""
+        if threading.get_ident() != gateway.owner:raise RuntimeError('Reset requires owner thread')
+        try:request=self._cycle_resets.get_nowait()
+        except queue.Empty:return False
+        controller=gateway.controller
+        with self.requests.mutex:
+            prior=[deepcopy(item[0]) for item in self.requests.queue]
+        controller._paper_reset_queued_requests=prior
+        was_known=request['id'] in controller.state.get('control_receipts',{})
+        try:
+            result=gateway.apply(request)
+            self.outcomes[request['id']]={k:result[k] for k in ('status','revision')}
+            if result['status']=='APPLIED' and not was_known:
+                # Request receipts were sealed atomically by the reset handler.
+                # The generation guard also rejects arrivals during that commit.
+                with self.lock:
+                    self._reset_generation+=1
+                    ids={r['id'] for r in prior}
+                    with self.requests.mutex:
+                        kept=[item for item in self.requests.queue if item[0]['id'] not in ids]
+                        removed=len(self.requests.queue)-len(kept)
+                        self.requests.queue.clear();self.requests.queue.extend(kept)
+                        self.requests.unfinished_tasks-=removed
+                        if not self.requests.unfinished_tasks:self.requests.all_tasks_done.notify_all()
+                        self.requests.not_full.notify_all()
+                    for old in prior:
+                        self.outcomes[old['id']]={'status':'REJECTED','reason':'Команда отменена сбросом цикла.'}
+        except Conflict:
+            self.outcomes[request['id']]={'status':'CONFLICT'}
+        except ActionRejected as exc:
+            self.outcomes[request['id']]={'status':'REJECTED','reason':str(exc)}
+        finally:
+            controller._paper_reset_queued_requests=[]
+            self._cycle_resets.task_done()
+        # Publish only; never drain stale ordinary actions in this step.
+        super().drain(gateway,view_factory,limit=0)
+        return True
+
     @staticmethod
     def _require_fresh(action, view, *, stage=None, queue_age=None):
         # PAPER commands use authoritative local state, not cache or quote age.
@@ -17,7 +85,9 @@ class PaperCommandMailbox(OwnerMailbox):
 
     def _guard_execution(self, action, preview):
         # Preserve reviewed obligations and settings, but not timing deadlines.
-        _published_at, _view, _queued_at, context = preview
+        _published_at, _view, _queued_at, context = preview[:4]
+        if len(preview)>4 and preview[4] != self._reset_generation:
+            raise SnapshotStale('CONTEXT_CHANGED',stage='execution_context')
         if action in ({'type':'command','text':'/stop'}, {'type':'command','text':'/resume_time'}, {'type':'command','text':'/sync_mt5_time'}):
             return
         if self.current_execution_view is not None and context is not None:
@@ -221,3 +291,18 @@ def cancel_without_quote(session, action):
     bot.state.clear();bot.state.update(state)
     bot._durable_state=deepcopy(state);exchange.p=paper
     return True
+
+
+def apply_reset_supersession(updated, controller):
+    """Called by reset planner before its single durable settlement commit."""
+    receipts=updated.setdefault('control_receipts',{})
+    active=getattr(controller,'_active_control_id',None)
+    for rid,receipt in receipts.items():
+        if rid != active and receipt.get('status')=='UNKNOWN':
+            receipt.update(status='REJECTED',paper_cycle_reset_superseded=True,previous_status='UNKNOWN',
+                reason='Прежняя команда завершена сбросом цикла; её подтверждённые последствия сохранены в истории, повтор запрещён.')
+    for request in getattr(controller,'_paper_reset_queued_requests',[]):
+        if request['id'] in receipts:continue
+        receipts[request['id']]=dict(digest=_request_digest(request),status='REJECTED',
+            revision=updated.get('control_revision',0),paper_cycle_reset_superseded=True,
+            reason='Команда отменена сбросом цикла; повтор не выполняется.')

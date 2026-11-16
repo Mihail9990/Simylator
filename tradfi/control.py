@@ -61,6 +61,12 @@ def validate_request(request):
     return json.loads(encoded)
 
 
+def is_overlap_cycle_reset(action, state):
+    return (action == {'type': 'paper_reset_cycle'} and
+            state.get('backend') == 'paper_mt5_quotes_v1' and
+            state.get('simulator_variant') == 'sl-overlap-recovery-v1')
+
+
 class ActionGateway:
     def __init__(self, controller, execute=None):
         self.controller = controller
@@ -87,13 +93,22 @@ class ActionGateway:
             if previous['digest'] != digest:
                 if self.diagnostics:self.diagnostics.action('action_conflict', request, status='CONFLICT')
                 raise Conflict('Action id reused with different payload')
+            if (is_overlap_cycle_reset(request['action'],state) and previous.get('status')=='UNKNOWN'
+                    and previous.get('paper_cycle_reset_atomic')
+                    and (self.controller._durable_state.get('control_receipts',{}).get(request['id'])==previous)):
+                # Owner-thread retry: this atomic action can only have effects
+                # together with APPLIED. A durable UNKNOWN proves no reset commit.
+                previous.update(status='REJECTED',reason='Сброс не был сохранён. Ничего не сброшено; можно нажать сброс заново.')
+                self.controller.save('paper_reset_uncommitted_retry_reconciled')
             if self.diagnostics:self.diagnostics.action('action_replayed', request, status=previous['status'], revision=previous['revision'])
             return deepcopy(previous)
         revision = state.get('control_revision', 0)
-        if request['revision'] != revision:
+        cycle_reset = is_overlap_cycle_reset(request['action'], state)
+        if request['revision'] != revision and not cycle_reset:
             if self.diagnostics:self.diagnostics.action('action_conflict', request, status='CONFLICT', revision=revision)
             raise Conflict('State changed; refresh preview before Apply')
         receipt = dict(digest=digest, status='UNKNOWN', revision=revision+1)
+        if cycle_reset:receipt['paper_cycle_reset_atomic'] = True
         if request['action'].get('type') == 'paper_interrupt' and state.get('backend') == 'paper_mt5_quotes_v1':
             # This action commits its receipt with the entire virtual settlement.
             # A crash immediately after reservation is therefore safe to reconcile.
@@ -113,7 +128,7 @@ class ActionGateway:
         try:
             # Recheck after reservation, immediately before effects. Existing
             # receipts return above and can never be relabelled or replayed.
-            if pre_execute is not None:
+            if pre_execute is not None and not cycle_reset:
                 pre_execute(request['action'])
             self.execute(deepcopy(request['action']))
         except ActionRejected as exc:
@@ -130,8 +145,12 @@ class ActionGateway:
             self.controller._active_control_id=None
         # The command may have replaced the in-memory state while reconciling.
         receipt = self.controller.state['control_receipts'][request['id']]
+        # The reset handler commits its receipt with all PAPER effects. Do not
+        # turn a completed atomic reset into a second fallible storage operation.
+        durable_receipt = getattr(self.controller, '_durable_state', {}).get('control_receipts', {}).get(request['id'])
+        atomic_reset_done = cycle_reset and status == 'APPLIED' and receipt.get('status') == 'APPLIED' and durable_receipt == receipt
         receipt['status'] = status
-        self.controller.save('control_action_completed')
+        if not atomic_reset_done:self.controller.save('control_action_completed')
         if self.diagnostics:self.diagnostics.action('action_completed', request, status=status, revision=receipt['revision'], error_type=error_type, reservation_ms=round(reservation_ms,3), duration_ms=round((time.perf_counter()-started)*1000,3), **guard_evidence)
         return deepcopy(receipt)
 
@@ -216,6 +235,9 @@ class OwnerMailbox:
         if feed.get('status') != 'FRESH' or feed.get('timestamp_semantics') != 'VERIFIED':
             raise SnapshotStale('FEED_STALE', **evidence)
 
+    def _submission_preview(self, preview):
+        return preview
+
     def submit(self, request):
         request = validate_request(request)
         preview = None
@@ -234,7 +256,7 @@ class OwnerMailbox:
                 self._require_fresh(request['action'], self._guard_view(self.monotonic()), stage='submit')
                 feed = self._view.get('feed') or {}
                 preview = (self._published_at, {'feed': {key: deepcopy(feed.get(key)) for key in ('status', 'timestamp_semantics', 'age_seconds', 'reason')}}, self.monotonic(), self._command_context(self._view) if self.current_execution_view is not None and 'context_token' in request else None)
-            self.requests.put_nowait((request, preview))
+            self.requests.put_nowait((request, self._submission_preview(preview)))
         return {'id': request['id'], 'status': 'QUEUED'}
 
     def view(self):

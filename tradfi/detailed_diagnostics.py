@@ -8,7 +8,7 @@ import uuid
 EVENTS = {'capture_failed', 'owner_step', 'action_reserved', 'action_completed', 'action_replayed', 'action_conflict', 'transport_rejected'}
 STATUSES = {'APPLIED', 'REJECTED', 'UNKNOWN', 'CONFLICT', 'OK', 'UNAVAILABLE'}
 ERRORS = {'ActionRejected', 'SnapshotStale', 'ValueError', 'OSError', 'TimeoutError', 'ConnectionError', 'QuoteFreshnessError'}
-ACTIONS = {'command', 'paper_interrupt', 'paper_resume', 'paper_flatten', 'paper_costs', 'paper_reset_total', 'settings', 'edit', 'recovery_writeoff', 'cancel_trigger', 'protection', 'OTHER'}
+ACTIONS = {'command', 'paper_interrupt', 'paper_resume', 'paper_flatten', 'paper_costs', 'paper_reset_total', 'paper_reset_cycle', 'settings', 'edit', 'recovery_writeoff', 'cancel_trigger', 'protection', 'OTHER'}
 ACTIONS.update({'start','modules','triggers','delete_trigger','close_position','recovery_profiles','recovery_profile_select','v3_settings','v3_entry','v3_link','v3_cancel_link','v3_cancel_entry','v3_cancel_request','v3_adjust_sl','reverse_ladder','manual_close','writeoff_recovery'})
 CODES = {'QUOTE_CAPTURE_EXITED','QUOTE_CAPTURE_INVALID_SAMPLE','QUOTE_CAPTURE_IPC_FAILED','QUOTE_CAPTURE_OVERFLOW','QUOTE_CAPTURE_SEQUENCE_GAP','QUOTE_CAPTURE_START_FAILED','QUOTE_CAPTURE_START_TIMEOUT','QUEUE_EXPIRED','CONTEXT_CHANGED','SNAPSHOT_STALE','FEED_STALE','SCOPE_CHANGED','ACTION_CONFLICT','INVALID_ACTION','QUEUE_FULL','INVALID_LOG_REQUEST','AUTH_REQUIRED','SESSION_EXPIRED','ORIGIN_DENIED','HEADER_REQUIRED','AUTH_NOT_CONFIGURED','BOUNDED_JSON_REQUIRED','INVALID_LOGIN','LOGIN_RATE_LIMIT','AUTH_FAILED','SESSION_LIMIT','LOGS_UNAVAILABLE','NOT_FOUND'}
 COMMANDS = {'/start', '/stop', '/status', '/reset_manual', '/resume_time'}

@@ -7,6 +7,7 @@
  const apiPath=kind=>'/api/'+(mode==='paper'?'paper/':'')+kind;
  let view=null,pending=localStorage.getItem(storageKey('request')),pendingScope=localStorage.getItem(storageKey('scope')),busy=false,polling=false,loadedScope=null,preview=null,lines=[],zoom=1,pan=0,gesture=null,hold=null,timeOffset=0,visibleCount=60,previewFocus=null,previewWasOpen=false;
  let lastActionReceipt=null,pollTask=null,confirmingCommand=false;
+ let cycleResetDeliveries=loadCycleResetDeliveries(),cycleResetDelivery=null,cycleResetPending=null,cycleResetScope=null,cycleResetSending=false,cycleResetMessage='';
  const names={INITIAL_SIZE:'Объём начальной позиции',INITIAL_ENTRY_DISTANCE:'STOP от Close M1',INITIAL_SL_DISTANCE:'Начальный SL',INITIAL_TP_DISTANCE:'Начальный TP',BASKET_COUNT:'Число билетов корзины',TICKET_SIZE:'Объём одного билета',RECOVERY_SL_DISTANCE:'Фиксированный SL корзины',COST_RESERVE:'Резерв будущих расходов, валюта счёта',TP_STEP_MULTIPLIER:'Множитель шага TP (не меньше 1)',CYCLE_COOLDOWN_SECONDS:'Пауза после цикла, секунды'};
  const headers=()=>({'X-Local-Control':'1','X-Controller-Scope':view?.scope??''});
  function notice(id,text,tone='info'){const el=$(id);el.textContent=text;el.dataset.tone=tone;}
@@ -86,7 +87,7 @@
  $('reverse-enable').onclick=()=>reverseLadder(true);$('reverse-disable').onclick=()=>reverseLadder(false);
  $('start').onclick=()=>command('/start','Запустить следование закрытым M1 и восстановление корзинами?');
  $('stop').onclick=()=>command('/stop','Остановить новые входы и отменить ожидающие ордера? Открытые билеты сохраняют SL/TP. Долг не списывается.');
- $('reset').onclick=()=>command('/reset_manual','Подтвердить ручную сверку всех ордеров и билетов? Требуются доказанное закрытие и отсутствие неопределённости. Долг сохраняется.');
+ $('reset').onclick=()=>cycleResetSupported()?resetCycleNow():command('/reset_manual','Подтвердить ручную сверку всех ордеров и билетов? Требуются доказанное закрытие и отсутствие неопределённости. Долг сохраняется.');
  $('login-button').onclick=async()=>{const password=$('password').value;$('password').value='';try{const r=await fetch('/api/login',{method:'POST',headers:{...headers(),'Content-Type':'application/json'},body:JSON.stringify({password}),signal:AbortSignal.timeout(3000)});if(!r.ok)throw Error('Вход отклонён');$('login-error').textContent='';await poll();}catch(e){$('login-error').textContent=e.message;}};
  $('logout').onclick=async()=>{await fetch('/api/logout',{method:'POST',headers:{...headers(),'Content-Type':'application/json'},body:'{}'});location.reload();};
  // MT5 clock controls are separate from manual reconciliation and trade readiness.
@@ -509,7 +510,7 @@
   const historyKey=typeof view?.position_history_revision==='string'?String(view.scope??'')+':'+view.position_history_revision:JSON.stringify(records);if(renderTotalsHistory.lastHistoryKey===historyKey)return;renderTotalsHistory.lastHistoryKey=historyKey;
   $('position-history-list').replaceChildren();
   const stamp=value=>{if(value===null||value===undefined||value==='')return '—';const date=new Date(Number(value)*1000);return Number.isFinite(date.getTime())?date.toISOString().replace('T',' ').replace('.000Z',' UTC'):'—';};
-  const reasons={TP:'TP',SL:'SL',MANUAL:'Ручное закрытие',MANUAL_CLOSE:'Ручное закрытие',PAPER_INTERRUPT:'Прерывание пользователем',EXPERT:'Закрытие советником',MIXED:'Несколько причин закрытия'};
+  const reasons={TP:'TP',SL:'SL',MANUAL:'Ручное закрытие',MANUAL_CLOSE:'Ручное закрытие',PAPER_INTERRUPT:'Прерывание пользователем',PAPER_RESET:'Сброс цикла',EXPERT:'Закрытие советником',MIXED:'Несколько причин закрытия'};
   for(const record of records){
    const card=document.createElement('article');card.className='position-history-card';
    const heading=document.createElement('h2');heading.textContent=['BUY','SELL'].includes(record.side)?record.side:'Сторона не подтверждена';card.append(heading);
@@ -547,8 +548,9 @@
   $('source-label').textContent=(mode==='paper'?'Источник: MT5 read-only / бумажные исполнения':'Источник: MT5 / торговый контур')+' · '+(marketLabel(view.feed.timestamp)||'время MT5 не получено');
   if(mode==='paper'){$('paper-command-quote').textContent=paperQuoteText();$('paper-command-quote').dataset.tone=view.paper?.command_quote?.stale?'warning':'info';$('paper-status').textContent=view.paper?.paused_gap?'Симуляция продолжается на полученных тиках.':'Моделируются полученные тики; отсутствующий путь цены не выдумывается.';if(document.activeElement!==$('paper-cost'))$('paper-cost').value=view.paper?.commission_per_lot_side??'0';}
   $('edit-status').textContent=view.edit?'Правка '+view.edit.stage+': показываются фактические данные брокера. При частичном отказе автоматизация остановится.':'';$('journal').textContent=view.journal.join('\n');
-  $('request-status').textContent=pending?'Запрос '+pending+': '+(pendingScope===view.scope?view.action_results[pending]?.status??'ожидание':'другой контекст')+'. До сверки новые команды запрещены. При UNKNOWN проверьте журнал и брокера на VPS; перезагрузка не разрешает повтор.':'';
+  $('request-status').textContent=pending?'Запрос '+pending+': '+(pendingScope===view.scope?view.action_results[pending]?.status??'ожидание':'другой контекст')+'. До сверки обычные команды запрещены. При UNKNOWN проверьте журнал и брокера на VPS; перезагрузка не разрешает повтор.':'';
   for(const id of ['start','stop','reset','cancel-initial','save-settings','reverse-enable','reverse-disable','save-tp-grid','apply-level','paper-resume','paper-flatten','paper-save-cost'])$(id).disabled=!!pending||busy;
+  renderCycleReset();
   $('paper-resume').hidden=true;
   $('paper-flatten').disabled=!view?.cycle_id||!view.positions?.length||v3Blocked({type:'candle_close_all'});
   $('own-entry-sl').disabled=!!pending||busy||view.read_only||!view.positions.length||(!v3Enabled()||view.v3_controls?.can_own_entry_sl!==true)||!!view.edit||!!view.manual_close||!!view.manual_reason||!!view.migration_block||(mode!=='paper'&&!!view.time_block);
@@ -562,7 +564,79 @@
   $('reverse-enable').title=view.reverse_controls?.reason??'';$('reverse-disable').title=view.reverse_controls?.reason??'';
   if(loadedScope!==view.scope){fields();loadedScope=view.scope;}v3Render();draw();
  }
- async function poll(){if(polling||busy)return;polling=true;pollTask=(async()=>{const started=performance.now();try{const r=await fetch(apiPath('state'),{headers:headers(),signal:AbortSignal.timeout(2500)});if(!r.ok){if([401,403].includes(r.status)){$('login').hidden=false;$('workspace').hidden=true;}throw Error('Нет авторизованного снимка');}const v=await r.json();if(v.contract!=='ticket_basket_v1'||(mode==='paper'?v.mode!=='PAPER':v.mode==='PAPER'))throw Error('Несовместимая версия контроллера');view=v;acceptSnapshotFreshness(v,started);observeMt5DisplayClock();const status=pending&&pendingScope===v.scope?v.action_results[pending]?.status:null;if(['APPLIED','REJECTED','CONFLICT'].includes(status)){lastActionReceipt={status,reason:v.action_results[pending]?.reason,paper_quote:v.action_results[pending]?.paper_quote};clearPending();}$('login').hidden=true;$('workspace').hidden=false;render();}catch(e){v3Fresh=false;paperServerReady=false;if(view){v3Render();connectionLabel();updateBotActivity();$('paper-interrupt').disabled=paperInterruptDisabled();}$('feed-status').textContent='Нет обновления панели; последняя информация сохранена';}finally{polling=false;}})();return pollTask;}
+ async function poll(){if(polling||busy)return;polling=true;pollTask=(async()=>{const started=performance.now();try{const r=await fetch(apiPath('state'),{headers:headers(),signal:AbortSignal.timeout(2500)});if(!r.ok){if([401,403].includes(r.status)){$('login').hidden=false;$('workspace').hidden=true;}throw Error('Нет авторизованного снимка');}const v=await r.json();if(v.contract!=='ticket_basket_v1'||(mode==='paper'?v.mode!=='PAPER':v.mode==='PAPER'))throw Error('Несовместимая версия контроллера');view=v;reconcileCycleReset(v);acceptSnapshotFreshness(v,started);observeMt5DisplayClock();const status=pending&&pendingScope===v.scope?v.action_results[pending]?.status:null;if(['APPLIED','REJECTED','CONFLICT'].includes(status)){lastActionReceipt={status,reason:v.action_results[pending]?.reason,paper_quote:v.action_results[pending]?.paper_quote};clearPending();}$('login').hidden=true;$('workspace').hidden=false;render();}catch(e){v3Fresh=false;paperServerReady=false;if(view){v3Render();connectionLabel();updateBotActivity();$('paper-interrupt').disabled=paperInterruptDisabled();}$('feed-status').textContent='Нет обновления панели; последняя информация сохранена';}finally{polling=false;}})();return pollTask;}
+ // Overlap PAPER reset has its own request lane: it supersedes queued work.
+ function validCycleResetDelivery(delivery){
+  try{const request=JSON.parse(delivery?.body??'null');return typeof delivery?.scope==='string'&&!!delivery.scope&&typeof delivery.body==='string'&&request&&Object.keys(request).sort().join(',')==='action,id,revision'&&typeof request.id==='string'&&!!request.id&&Number.isInteger(request.revision)&&request.revision>=0&&request.action&&Object.keys(request.action).join(',')==='type'&&request.action.type==='paper_reset_cycle';}catch{return false;}
+ }
+ function loadCycleResetDeliveries(){
+  const result=new Map();
+  try{const values=JSON.parse(localStorage.getItem(storageKey('cycle-reset-deliveries'))??'[]');if(Array.isArray(values))for(const value of values)if(validCycleResetDelivery(value))result.set(value.scope,{scope:value.scope,body:value.body});}catch{}
+  // Preserve the previous single-envelope format without crossing its scope.
+  try{const value=JSON.parse(localStorage.getItem(storageKey('cycle-reset-delivery'))??'null');if(validCycleResetDelivery(value)&&!result.has(value.scope))result.set(value.scope,{scope:value.scope,body:value.body});}catch{}
+  return result;
+ }
+ function saveCycleResetDelivery(scope,delivery){
+  const next=new Map([...cycleResetDeliveries,...loadCycleResetDeliveries()]);if(delivery)next.set(scope,delivery);else next.delete(scope);
+  localStorage.setItem(storageKey('cycle-reset-deliveries'),JSON.stringify([...next.values()]));
+  cycleResetDeliveries=next;localStorage.removeItem(storageKey('cycle-reset-delivery'));
+ }
+ function syncCycleResetScope(scope=view?.scope){
+  if(cycleResetScope!==scope)cycleResetMessage='';
+  cycleResetScope=scope??null;cycleResetDelivery=cycleResetDeliveries.get(scope)??null;cycleResetPending=cycleResetDelivery?JSON.parse(cycleResetDelivery.body).id:null;
+ }
+ function cycleResetSupported(){return mode==='paper'&&view?.candle_recovery?.variant==='sl-overlap-recovery-v1';}
+ function cycleResetBlocked(){return !cycleResetSupported()||$('workspace').hidden===true||!view.scope||!Number.isInteger(view.revision)||cycleResetSending;}
+ function renderCycleReset(){
+  syncCycleResetScope();
+  const supported=cycleResetSupported();$('reset').textContent=supported?(cycleResetPending?'Повторить доставку сброса':'Сбросить цикл и RECOVERY · новый цикл'):'Ручная сверка…';
+  if(supported)$('reset').disabled=cycleResetBlocked();
+  $('paper-reset-cycle-note').hidden=!supported;$('paper-reset-cycle-status').hidden=!supported;
+  $('paper-reset-cycle-status').textContent=cycleResetMessage||(cycleResetPending?'Подтверждение ещё не получено. Можно повторить доставку того же запроса без повторного выполнения.':'');
+  const last=view?.paper?.last_reset;$('paper-reset-cycle-last').hidden=!supported||!last;
+  if(last){
+   const closed=Array.isArray(last.closed_positions)?last.closed_positions.length:'—',cancelled=Array.isArray(last.cancelled_orders)?last.cancelled_orders.length:'—',q=last.paper_quote;
+   let quote='Цена не использовалась.';
+   if(q){const date=typeof q.timestamp==='number'&&Number.isFinite(q.timestamp)?new Date(q.timestamp*1000):null;const stamp=date&&Number.isFinite(date.getTime())?date.toISOString().replace('T',' ').replace('.000Z',''):null;
+    quote='Последняя полученная цена: Bid '+(q.bid??'—')+' / Ask '+(q.ask??'—')+(stamp?' · '+stamp+(q.timestamp_semantics==='BROKER_RAW'?' (время брокера)':' UTC'):' · время не подтверждено')+'.';}
+   $('paper-reset-cycle-last').textContent='Последний сброс: закрыто позиций '+closed+', отменено ордеров '+cancelled+'; списано RECOVERY '+(last.written_off_recovery??'—')+' '+(last.currency??'UST')+'. '+quote+(last.automatic_restart?' Автозапуск нового цикла включён при сбросе.':'');
+  }
+
+ }
+ function clearCycleResetRequest(scope=cycleResetScope){saveCycleResetDelivery(scope,null);syncCycleResetScope();}
+ function acceptCycleResetReceipt(receipt,scope=cycleResetScope,id=cycleResetPending){
+  const saved=cycleResetDeliveries.get(scope);if(!receipt||!saved||JSON.parse(saved.body).id!==id)return;
+  const sameScope=scope===view?.scope;
+  if(receipt.status==='APPLIED'){clearCycleResetRequest(scope);if(sameScope){cycleResetMessage='Цикл и RECOVERY сброшены. Новый цикл включён; вход после закрытой свечи.';if(preview){cancelGesture();preview=null;$('preview').hidden=true;draw();}}}
+  else if(['REJECTED','CONFLICT'].includes(receipt.status)){clearCycleResetRequest(scope);if(sameScope)cycleResetMessage=receipt.reason||'Сброс отклонён сервером; состояние не подтверждено как сброшенное.';}
+  else if(sameScope)cycleResetMessage=receipt.status==='UNKNOWN'?'Исход сброса пока неизвестен. Можно повторить доставку того же запроса; новый сброс не создаётся.':'Сброс принят в очередь. Ожидается подтверждение сервера.';
+ }
+ function reconcileCycleReset(snapshot){
+  const saved=cycleResetDeliveries.get(snapshot.scope);if(saved){const id=JSON.parse(saved.body).id;acceptCycleResetReceipt(snapshot.action_results?.[id],snapshot.scope,id);}
+ }
+ async function resetCycleNow(){
+  syncCycleResetScope();
+  if(cycleResetBlocked())return;
+  const requestScope=view.scope;let requestId=null;cycleResetSending=true;
+  try{
+   if(!cycleResetDelivery){
+    const request={id:crypto.randomUUID(),revision:view.revision,action:{type:'paper_reset_cycle'}},delivery={scope:view.scope,body:JSON.stringify(request)};
+    // Persist the exact envelope before sending. Retries and reloads never
+    // manufacture a new id/revision/body for an unresolved reset.
+    saveCycleResetDelivery(delivery.scope,delivery);syncCycleResetScope();
+   }
+   const delivery=cycleResetDelivery;requestId=cycleResetPending;cycleResetMessage='Доставка сброса…';renderCycleReset();
+   const response=await fetch(apiPath('action'),{method:'POST',headers:{'X-Local-Control':'1','X-Controller-Scope':delivery.scope,'Content-Type':'application/json'},body:delivery.body,signal:AbortSignal.timeout(4000)});
+   if(!response.ok){
+    // HTTP rejection of a delivery attempt cannot prove that an earlier
+    // uncertain attempt did not commit. Keep the envelope until a receipt.
+    if([401,403].includes(response.status)){$('login').hidden=false;$('workspace').hidden=true;}
+    throw Error('Сервер не подтвердил сброс ('+response.status+').');
+   }
+   const receipt=await response.json();acceptCycleResetReceipt(receipt,requestScope,requestId);
+  }catch(e){if(view?.scope===requestScope&&(requestId===null||cycleResetDeliveries.has(requestScope)))cycleResetMessage=e.message+(cycleResetDeliveries.has(requestScope)?' Можно повторить доставку этого же запроса без нового сброса.':'');}
+  finally{cycleResetSending=false;renderCycleReset();await poll();}
+ }
  const defaultPrefs={mainTrend:false,mainCycle:true,pane:null,pattern:{trend:false,cycle:true},figure:{trend:false,cycle:true},liquidity:false,opacity:20,colors:{BUY:'#26a69a',SELL:'#ef5350',sl:'#ef5350',tp:'#26a69a',entry:'#e0b565',up:'#26a69a',down:'#ef5350',grid:'#25282e',zone:'#e0b565'}};
  let prefs=structuredClone(defaultPrefs);try{const saved=JSON.parse(localStorage.getItem('chart-preferences-v1')??'null');if(saved){for(const k of ['mainTrend','mainCycle','liquidity'])if(typeof saved[k]==='boolean')prefs[k]=saved[k];if(['pattern','figure',null].includes(saved.pane))prefs.pane=saved.pane;for(const pane of ['pattern','figure'])for(const k of ['trend','cycle'])if(typeof saved[pane]?.[k]==='boolean')prefs[pane][k]=saved[pane][k];if(Number.isFinite(saved.opacity))prefs.opacity=Math.max(0,Math.min(100,saved.opacity));for(const k of Object.keys(prefs.colors))if(/^#[0-9a-f]{6}$/i.test(saved.colors?.[k]))prefs.colors[k]=saved.colors[k];}}catch{}
  const savePrefs=()=>{localStorage.setItem('chart-preferences-v1',JSON.stringify(prefs));layout();draw();};

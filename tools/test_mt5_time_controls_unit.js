@@ -32,7 +32,7 @@ context.mode='paper';
  const migratedCount=actions.length;
  context.view.time_status.market_time_mode='fixed_offset_v1';onConfirm=()=>context.view.revision++;await $('sync-mt5-time').onclick();assert.equal(actions.length,migratedCount,'revision change during confirmation requires new confirmation');assert(errors.at(-1).includes('Контекст изменился'));onConfirm=null;
  context.view.scope='different';render();assert($('mt5-display-clock').textContent.endsWith('—'),'old clock does not cross controller scope');
- assert(source.includes("$('reset').onclick=()=>command('/reset_manual'"),'manual reconciliation remains a distinct original control');
+ assert(source.includes("$('reset').onclick=()=>cycleResetSupported()?resetCycleNow():command('/reset_manual'"),'non-overlap manual reconciliation remains distinct from the one-click overlap reset');
  assert(!source.slice(source.indexOf(' // MT5 clock controls are separate'),source.indexOf(' // Activity uses controller snapshots')).includes('Date.now'));
  // No reconnect pause or continuation handler in PAPER.
  assert(!source.includes("$('paper-resume').onclick="));
