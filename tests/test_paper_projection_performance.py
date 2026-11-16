@@ -75,7 +75,8 @@ class CompactPaperSnapshotTests(unittest.TestCase):
             self.assertEqual(tick.call_count,1)
             self.assertEqual(publish.call_count,0)
             self.assertNotEqual(self.session.exchange.p['cursor'],previous)
-        self.session._last_publication=0
+        import time
+        self.session._last_publication=time.perf_counter()-self.session.publication_interval-1
         with patch.object(self.session.mailbox,'drain',wraps=self.session.mailbox.drain) as publish:
             self.reader.tick('4002','4002.1');self.session.step()
             self.assertEqual(publish.call_count,1)
