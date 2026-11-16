@@ -83,13 +83,15 @@ class CandleRecoveryController(ControlledRecoveryController):
 
     def _observe(self,snap):
         if not super()._observe(snap):return False
+        from .paper_evidence_index import paper_index
+        index=paper_index(self,snap)
         c=self.state['cycle']
         for t in c['tickets'].values():
             original=self.state['commands'][t['command_id']]['sl']
             t.setdefault('original_sl',original)
-            p=next((p for p in snap['positions'] if p['id']==t['id']),None)
+            p=next(iter(index.live.get(t['id'],[])),None) if index else next((p for p in snap['positions'] if p['id']==t['id']),None)
             # Closing facts cover a move and stop between two controller polls.
-            closes=[d for d in snap['deals'] if d.get('position_id')==t['id'] and d.get('entry')=='OUT']
+            closes=index.outs_position.get(t['id'],[]) if index else [d for d in snap['deals'] if d.get('position_id')==t['id'] and d.get('entry')=='OUT']
             levels=([p['sl']] if p else [])+[d['sl'] for d in closes if d.get('sl') is not None]
             if any(number(sl)!=number(original) for sl in levels):t['support_sl']=True
         return True

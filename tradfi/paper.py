@@ -20,13 +20,18 @@ class PaperExchange:
         self.p=json.loads(row[0]) if row else dict(identity='PAPER-'+uuid.uuid4().hex,orders=[],positions=[],deals=[],order_history=[],results={},cursor=None,cursor_keys=[],commission_per_lot_side='0',paused_gap=False)
         self.account=self.p['identity'];self.boot=True
         self.command_baseline=None;self.command_quote=None
+        self.performance={}
+        from .paper_immutable_history import ImmutableHistory
+        self._execution_history={key:ImmutableHistory() for key in ('deals','order_history')}
         # Old restart/gap latches do not pause a simulator. Explicit stop is
         # independently persisted by the controller and is never cleared here.
         self.p['paused_gap']=False
         self.persist()
     def persist(self):
+        started=time.perf_counter()
         try:self.store.db.execute('INSERT OR REPLACE INTO paper_exchange VALUES(1,?)',(json.dumps(self.p,sort_keys=True,allow_nan=False),))
         except Exception as exc:raise DurabilityError('Paper persistence failed; stop and reload') from exc
+        finally:self.performance['exchange_persist_ms']=self.performance.get('exchange_persist_ms',0)+(time.perf_counter()-started)*1000
     def profit(self,side,size,entry,close):
         market=self.p.get('last_verified_market') if self.command_baseline is not None else self.market
         if market is None:raise OSError('No verified MT5 specification')
@@ -86,16 +91,30 @@ class PaperExchange:
             if sign*(price-number(o['price']))>=0:self._fill(o,price)
         close_crossed()  # gap may cross a newly filled ticket's unchanged SL
         self.persist()
-    def snapshot(self):
-        if self.command_baseline is not None:
-            from .paper_commands import quote_info, reject
-            if not quote_info(self)['available']:reject('Нет последней проверенной котировки PAPER. Цена не выдумана; дождитесь первого проверенного снимка.')
-            market=self.p['last_verified_market']
-            return dict(account=self.account,hedging=True,history_complete=True,spec=deepcopy(market['spec']),now=self.clock(),quote=deepcopy(market['quote']),candle=deepcopy(market['candle']),
-                **{k:deepcopy(self.p[k]) for k in ('orders','positions','deals','order_history')})
-        if not self.available or self.market is None or (self.market.get('timestamp_semantics')!='BROKER_RAW' and not -2<=self.clock()-self.market['timestamp']<=5):raise OSError('Paper waits for verified fresh MT5 data')
-        return dict(account=self.account,hedging=True,history_complete=True,spec=deepcopy(self.market['spec']),now=self.clock(),quote=deepcopy(self.market['quote']),candle=deepcopy(self.market['candle']),
-            **{k:deepcopy(self.p[k]) for k in ('orders','positions','deals','order_history')})
+    def snapshot_for_controller(self):
+        return self.snapshot(_immutable_history=True)
+
+    def snapshot(self, *, include_history=True, _immutable_history=False):
+        """Full execution evidence by default; compact read-only market projection.
+
+        Submission validation only uses quote/spec, and the panel uses live
+        orders/positions. Neither needs another deep copy of all past fills.
+        Controller reconciliation continues to receive the complete ledger.
+        """
+        started=time.perf_counter()
+        try:
+            if self.command_baseline is not None:
+                from .paper_commands import quote_info, reject
+                if not quote_info(self)['available']:reject('Нет последней проверенной котировки PAPER. Цена не выдумана; дождитесь первого проверенного снимка.')
+                market=self.p['last_verified_market']
+            else:
+                if not self.available or self.market is None or (self.market.get('timestamp_semantics')!='BROKER_RAW' and not -2<=self.clock()-self.market['timestamp']<=5):raise OSError('Paper waits for verified fresh MT5 data')
+                market=self.market
+            keys=('orders','positions','deals','order_history') if include_history else ('orders','positions')
+            return dict(account=self.account,hedging=True,history_complete=include_history,
+                spec=deepcopy(market['spec']),now=self.clock(),quote=deepcopy(market['quote']),candle=deepcopy(market['candle']),
+                **{k:(self._execution_history[k].snapshot(self.p[k]) if _immutable_history and k in self._execution_history else deepcopy(self.p[k])) for k in keys})
+        finally:self.performance['exchange_snapshot_ms']=self.performance.get('exchange_snapshot_ms',0)+(time.perf_counter()-started)*1000
     def result(self,cid):return deepcopy(self.p['results'].get(cid,{'status':'UNKNOWN'}))
     def command_permitted(self,cid):
         return self.command_baseline is None or cid not in self.command_baseline
@@ -103,7 +122,7 @@ class PaperExchange:
         if cmd['id'] in self.p['results']:return  # durable idempotency, no second paper effect
         kind=cmd['kind'];result={'status':'REJECTED','never_sent':True}
         try:
-            snap=self.snapshot();spec=Spec.load(snap['spec']);q=snap['quote']
+            snap=self.snapshot(include_history=False);spec=Spec.load(snap['spec']);q=snap['quote']
             if kind in {'STOP','MARKET'}:
                 if cmd['side'] not in {'BUY','SELL'}:raise ValueError('side')
                 size=number(cmd['size']);price=spec.price(q['ask' if cmd['side']=='BUY' else 'bid'] if kind=='MARKET' else cmd['price']);sign=1 if cmd['side']=='BUY' else -1
@@ -160,6 +179,12 @@ class PaperSession:
         from .paper_commands import PaperCommandMailbox
         self.scope=self.exchange.account;self.gateway=ActionGateway(self.controller,execute=self.action);self.mailbox=PaperCommandMailbox(monotonic=monotonic,max_age_seconds=2,current_execution_view=self._execution_view,max_queue_age_seconds=3);self._execution_started=None;self._execution_ok=False;self.snapshot=None
         self.presentation=None
+        from .paper_position_history import PositionHistoryCache
+        self._history_cache=PositionHistoryCache()
+        self._view_performance={}
+        self.capture_failure=None
+        self.publication_interval=0
+        self._last_publication=0
         from .detailed_diagnostics import DetailedDiagnostics
         self.diagnostics=DetailedDiagnostics(clock)
         self.gateway.diagnostics=self.diagnostics
@@ -167,7 +192,19 @@ class PaperSession:
     def _fresh(self):
         try:return self.exchange.snapshot()
         except OSError as exc:raise ActionRejected('Ожидание данных MT5',public_message='Ожидаются проверенные свежие котировки MT5; бумажное действие не выполнено.') from exc
+    def latch_capture_failure(self, reason):
+        allowed={'QUOTE_CAPTURE_EXITED','QUOTE_CAPTURE_INVALID_SAMPLE','QUOTE_CAPTURE_IPC_FAILED',
+                 'QUOTE_CAPTURE_OVERFLOW','QUOTE_CAPTURE_SEQUENCE_GAP','QUOTE_CAPTURE_START_FAILED','QUOTE_CAPTURE_START_TIMEOUT'}
+        self.capture_failure=reason if reason in allowed else 'QUOTE_CAPTURE_IPC_FAILED'
+        self.exchange.available=False
+        self._execution_ok=False
+        self.diagnostics.record('capture_failed',status='UNAVAILABLE',error_code=self.capture_failure)
+        self.mailbox.drain(self.gateway,self.view,limit=0)
+        self._last_publication=time.perf_counter()
+
     def action(self,a):
+        if self.capture_failure:
+            raise ActionRejected(self.capture_failure, public_message='Получение котировок остановлено: '+self.capture_failure+'. Симуляция не продолжается с пропущенными данными. Проверьте журнал и перезапустите сервис; история и долг сохранены.')
         from .paper_commands import command_scope, advance_command, cancel_without_quote
         with command_scope(self,a):
             if cancel_without_quote(self,a):return
@@ -236,21 +273,52 @@ class PaperSession:
         return view
 
     def step(self):
+        if self.capture_failure:
+            # Keep the diagnostic panel reachable, but never process another
+            # market sample or execute a queued strategy action after a gap.
+            if not self.mailbox.requests.empty() or time.perf_counter()-self._last_publication>=max(.5,self.publication_interval):
+                self.mailbox.drain(self.gateway,self.view,limit=8)
+                self._last_publication=time.perf_counter()
+            return
+        from .paper_quote_capture import CaptureFailure
         self._execution_started=self.mailbox.monotonic();self._execution_ok=False
         had_requests=not self.mailbox.requests.empty()
         started=time.perf_counter(); marks={}; error_type=None
+        self.exchange.performance={};self._view_performance={}
         try:
             before=time.perf_counter(); market=self.reader.read(); marks['read_ms']=(time.perf_counter()-before)*1000
             before=time.perf_counter(); self.exchange.observe(market); marks['observe_ms']=(time.perf_counter()-before)*1000
             before=time.perf_counter()
             self.controller.tick()
             marks['tick_ms']=(time.perf_counter()-before)*1000
-            self.snapshot=self.exchange.snapshot()
+            self.snapshot=self.exchange.snapshot(include_history=False)
+            acknowledge=getattr(self.reader,'acknowledge',None)
+            if acknowledge is not None:acknowledge()
             self._execution_ok=True
         except DurabilityError:raise
+        except CaptureFailure:raise
         except Exception as exc:
             error_type=type(exc).__name__;self.exchange.available=False;self.reader.reason=self.reader.reason or 'WAIT_FRESH_MT5'
-        before=time.perf_counter(); self.mailbox.drain(self.gateway,self.view); marks['publish_ms']=(time.perf_counter()-before)*1000
+        before=time.perf_counter()
+        receipt_watermark=getattr(self.reader,'command_receipt_watermark',False)
+        if receipt_watermark:
+            with self.mailbox.requests.mutex:
+                first=self.mailbox.requests.queue[0] if self.mailbox.requests.queue else None
+            queued_at=first[1][2] if first and first[1] else None
+            ready=self.reader.ready_for_commands(queued_at)
+        else:
+            ready=getattr(self.reader,'ready_for_commands',lambda:True)()
+        # Presentation has its own cadence; every captured sample still reaches
+        # observe/controller in order. Requests and failures publish promptly.
+        if had_requests or error_type or time.perf_counter()-self._last_publication>=self.publication_interval:
+            self.mailbox.drain(self.gateway,self.view,limit=(1 if receipt_watermark else 8) if ready else 0)
+            self._last_publication=time.perf_counter()
+        marks['publish_ms']=(time.perf_counter()-before)*1000
+        marks.update(self.exchange.performance);marks.update(self._view_performance)
+        if hasattr(self.reader,'metrics'):
+            capture=self.reader.metrics()
+            for source,target in [('pending','capture_pending'),('processed','capture_processed'),('processing_lag_seconds','capture_lag_seconds'),('read_ms','capture_read_ms')]:
+                if type(capture.get(source)) in (int,float):marks[target]=capture[source]
         now=time.perf_counter()
         # Heartbeat rather than a raw quote stream; failures are always observed.
         if error_type or had_requests or now-started>=1 or now-self._diagnostic_last_step>=10:
@@ -260,24 +328,33 @@ class PaperSession:
                 positions_count=len(self.exchange.p['positions']), orders_count=len(self.exchange.p['orders']),
                 **{k:round(v,3) for k,v in marks.items()})
     def view(self):
+        started=time.perf_counter()
         from .web_control import PaperPresentation
         if self.presentation is None:
             self.presentation=object.__new__(PaperPresentation);self.presentation.controller=self.controller;self.presentation.scope=self.scope
-        s=self.controller.state;c=s.get('cycle') or {};snap=deepcopy(self.snapshot) if self.snapshot else {}
+        s=self.controller.state;c=s.get('cycle') or {}
+        snap={k:deepcopy(value) for k,value in (self.snapshot or {}).items() if k not in {'deals','order_history'}}
         snap.update({k:deepcopy(self.exchange.p[k]) for k in ('orders','positions')})
         v=self.presentation.basket_view(s,c,snap,self.reader.view())
         if getattr(self.reader,'market_time_mode',None)=='mt5_raw_v1':
             v['time_status'].update(display_clock=self.reader.display_clock.view(),
                 market_time_mode='mt5_raw_v1',can_switch_raw=False,
                 switch_reason='Исходное время MT5 уже включено в симуляторе.')
-        from .paper_position_history import position_history
-        history=position_history(self.exchange.p,s.get('currency'),bool(s.get('completed')),s.get('commands',{}))
+        history_started=time.perf_counter()
+        history=self._history_cache.view(self.exchange.p,s.get('currency'),bool(s.get('completed')),s.get('commands',{}))
+        self._view_performance['history_ms']=self._view_performance.get('history_ms',0)+(time.perf_counter()-history_started)*1000
         v['position_history']=history['position_history'];v['metrics'].update(history['metrics'])
+        v['position_history_revision']=f'{self._history_cache.generation}:{self._history_cache.rebuilds}'
         v.update(mode='PAPER',source='PAPER_ON_MT5_READ_ONLY',paper=dict(paused_gap=self.exchange.p['paused_gap'],commission_per_lot_side=self.exchange.p['commission_per_lot_side'],cost_model='modeled commission per lot per side; swap/fee=0',history=deepcopy(self.exchange.p['deals'][-100:]),cursor=self.exchange.p['cursor'],last_interrupt=deepcopy(s.get('last_paper_interrupt'))))
+        if self.capture_failure:
+            v['read_only']=True
+            v['feed'].update(status='ERROR',reason=self.capture_failure)
+            v['paper']['capture_failure']=self.capture_failure
         from .paper_commands import quote_info
         v['paper']['command_quote']=quote_info(self.exchange)
         v['paper']['last_command_quote']=deepcopy(s.get('last_paper_command_quote'))
         for rid,receipt in s.get('control_receipts',{}).items():
             if 'paper_quote' in receipt:v['action_results'][rid]['paper_quote']=deepcopy(receipt['paper_quote'])
+        self._view_performance['view_ms']=self._view_performance.get('view_ms',0)+(time.perf_counter()-started)*1000
         return v
     def close(self):self.store.close()

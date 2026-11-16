@@ -75,3 +75,38 @@ def position_history(exchange,currency,has_completed=False,commands=None):
     records.sort(key=lambda r:r['opened_at'] or 0,reverse=True)
     return dict(position_history=records,metrics=dict(all_closed_net=str(total) if complete else None,
                 history_complete=complete,history_note='' if complete else 'Часть сохранённых данных исполнений неполна. Общий результат недоступен; неизвестные значения показаны как —.'))
+
+
+class PositionHistoryCache:
+    """Read-only projection cache, never execution/accounting authority.
+
+    A type-sensitive fingerprint checks the full ledger, not length/newest ID, so
+    corrections, same-length replacements and corrupt duplicates invalidate it.
+    Returned objects are detached from both the ledger and cached projection.
+    """
+    def __init__(self):
+        self._fingerprint = None
+        self._key = None
+        self._result = None
+        self.rebuilds = 0
+        import uuid
+        self.generation = uuid.uuid4().hex
+
+    def view(self, exchange, currency, has_completed=False, commands=None):
+        from copy import deepcopy
+        deals = exchange.get('deals', [])
+        live = frozenset(p.get('id') for p in exchange.get('positions', []))
+        filled = None if commands is None else frozenset(cid for cid, cmd in commands.items()
+            if cmd.get('kind') in {'STOP', 'MARKET'} and cmd.get('status') == 'FILLED')
+        key = (currency, bool(has_completed), live, filled)
+        # Serialize only; never unpickle. Unlike Python equality this detects
+        # timestamp 1 -> True and signed-zero/type-only corrections.
+        from .paper_cache_equality import fingerprint as encode_fingerprint
+        fingerprint = encode_fingerprint((key, deals))
+        if fingerprint != self._fingerprint:
+            result = position_history(exchange, currency, has_completed, commands)
+            self._fingerprint = fingerprint
+            self._key = key
+            self._result = result
+            self.rebuilds += 1
+        return deepcopy(self._result)

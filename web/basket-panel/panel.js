@@ -505,7 +505,7 @@
   const records=Array.isArray(view?.position_history)?view.position_history:[];
   $('position-history-note').textContent=metrics?.history_note??(metrics?.history_complete===true?'':'Нет подтверждённой полной истории.');
   $('position-history-empty').textContent=records.length?'':'Исполненных позиций пока нет.';
-  const historyKey=JSON.stringify(records);if(renderTotalsHistory.lastHistoryKey===historyKey)return;renderTotalsHistory.lastHistoryKey=historyKey;
+  const historyKey=typeof view?.position_history_revision==='string'?String(view.scope??'')+':'+view.position_history_revision:JSON.stringify(records);if(renderTotalsHistory.lastHistoryKey===historyKey)return;renderTotalsHistory.lastHistoryKey=historyKey;
   $('position-history-list').replaceChildren();
   const stamp=value=>{if(value===null||value===undefined||value==='')return '—';const date=new Date(Number(value)*1000);return Number.isFinite(date.getTime())?date.toISOString().replace('T',' ').replace('.000Z',' UTC'):'—';};
   const reasons={TP:'TP',SL:'SL',MANUAL:'Ручное закрытие',MANUAL_CLOSE:'Ручное закрытие',PAPER_INTERRUPT:'Прерывание пользователем',EXPERT:'Закрытие советником',MIXED:'Несколько причин закрытия'};
@@ -524,7 +524,7 @@
  function render(){
   renderMt5TimeControls();renderTotalsHistory();
   connectionLabel();updateBotActivity();
-  $('phase').textContent=view.phase;$('cycle').textContent=view.cycle_id??'Ожидание цикла';$('debt').textContent=view.debt+' UST';$('realized').textContent='Учёт с переносом: '+view.realized+' UST';$('feed-status').textContent=view.feed.status;$('mode').textContent=mode==='paper'?'PAPER · без реальных сделок':view.read_only?'READ_ONLY':view.stopped?'Новые входы остановлены':'EXECUTION';
+  $('phase').textContent=view.phase;$('cycle').textContent=view.cycle_id??'Ожидание цикла';$('debt').textContent=view.debt+' UST';$('realized').textContent='Учёт с переносом: '+view.realized+' UST';$('feed-status').textContent=(view.paper?.capture_failure?(view.paper.capture_failure==='QUOTE_CAPTURE_OVERFLOW'?'Очередь котировок переполнена · симуляция остановлена':'Ошибка получения котировок: '+view.paper.capture_failure):view.feed.status)+(mode==='paper'&&Number.isInteger(view.feed.capture?.pending)&&view.feed.capture.pending>0?' · очередь котировок: '+view.feed.capture.pending+' / '+view.feed.capture.capacity:'');$('mode').textContent=mode==='paper'?'PAPER · без реальных сделок':view.read_only?'READ_ONLY':view.stopped?'Новые входы остановлены':'EXECUTION';
   $('safety').textContent=''; // Safety reasons remain visible in the colored activity area, without duplicate raw labels.
   $('quote').textContent='Bid '+(view.feed.quote?.bid??'—')+' / Ask '+(view.feed.quote?.ask??'—')+' · возраст '+(view.feed.age_seconds??'—')+' сек.';
   $('source-label').textContent=(mode==='paper'?'Источник: MT5 read-only / бумажные исполнения':'Источник: MT5 / торговый контур')+' · '+(marketLabel(view.feed.timestamp)||'время MT5 не получено');

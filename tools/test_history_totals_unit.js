@@ -18,6 +18,11 @@ ctx.view.metrics.all_closed_net=null;ctx.view.metrics.history_complete=false;ctx
 assert.equal($('activity-totals-note').hidden,false);assert($('activity-totals-note').textContent.includes('история исполнений неполна'));
 ctx.view={debt:'999',realized:'999',position_history:[{side:'BUY',status:'open',net:null}]};run();assert.equal($('activity-recovery').textContent,'—','no invented fallback');assert.equal($('position-history-list').children[0].children.at(-1).textContent,'Итог после закрытия · —');
 assert(!$('position-history-list').children[0].children.some(x=>x.textContent.includes('RECOVERY')||x.textContent.includes('переносом')));
+ctx.view={scope:'paper-one',position_history_revision:'generation:1',metrics:{history_complete:true},position_history:[{side:'BUY',status:'closed',net:'1'}]};run();
+const stableCard=$('position-history-list').children[0];
+ctx.view.metrics.recovery_total='44';run();assert.strictEqual($('position-history-list').children[0],stableCard,'unchanged history must not rebuild DOM');
+ctx.view.position_history=[{side:'SELL',status:'closed',net:'2'}];ctx.view.position_history_revision='generation:2';run();assert.notStrictEqual($('position-history-list').children[0],stableCard,'changed history redraws');
+const previous=$('position-history-list').children[0];ctx.view.position_history_revision='new-process:1';run();assert.notStrictEqual($('position-history-list').children[0],previous,'restart generation cannot reuse stale history DOM');
 vm.runInContext(src.slice(src.indexOf(" let activeTab='chart';"),src.indexOf(' function setDrawer(')),ctx);
 $('tab-history').onclick();assert.equal($('history-page').hidden,false);assert.equal($('chart-page').hidden,true);assert.equal($('settings-page').hidden,true);assert.equal($('tab-history').attributes['aria-selected'],'true');
 $('tab-history').events.keydown({key:'ArrowRight',preventDefault(){}});assert.equal($('settings-page').hidden,false);

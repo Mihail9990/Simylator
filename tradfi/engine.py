@@ -134,7 +134,11 @@ class Controller:
                 self.store.save(self.state,event,expected=self._durable_state)
             else:
                 self.store.save(self.state, event)
-            self._durable_state=deepcopy(self.state)
+            # PAPER saves still perform the full durable Store transaction.
+            # An unchanged committed state needs no second identical deep copy.
+            from .paper_cache_equality import exact_equal
+            if getattr(self.broker, 'backend_id', None) != 'paper_mt5_quotes_v1' or not exact_equal(self.state,self._durable_state):
+                self._durable_state=deepcopy(self.state)
         except DurabilityError:
             self.state = self.store.load() or self.state
             self._durable_state=deepcopy(self.state)
@@ -169,7 +173,10 @@ class Controller:
 
     def _validated_snapshot(self, *, for_reset=False):
         self._validate_currency()
-        snap = self.broker.manual_reset_snapshot() if for_reset else self.broker.snapshot()
+        if not for_reset and getattr(self.broker, 'backend_id', None) == 'paper_mt5_quotes_v1' and hasattr(self.broker, 'snapshot_for_controller'):
+            snap = self.broker.snapshot_for_controller()
+        else:
+            snap = self.broker.manual_reset_snapshot() if for_reset else self.broker.snapshot()
         identity = snap['account']
         if self.state['account'] is not None and self.state['account'] != identity:
             raise ValueError('Gateway account identity changed')
@@ -571,6 +578,8 @@ class Controller:
     def _reconcile_commands(self, snap):
         if self.evidence_contract == 'per_obligation_v1':
             return self._reconcile_evidence_commands(snap)
+        from .paper_evidence_index import paper_index
+        index = paper_index(self, snap)
         for cid, cmd in self.state['commands'].items():
             if cmd['status'] == 'OBSOLETE':
                 continue  # terminal position closure superseded this operation, not a success ack
@@ -580,28 +589,28 @@ class Controller:
             if result.get('status') in TERMINAL | {'ACCEPTED'}:
                 cmd.update(status=result['status'], result=result)
             if cmd['kind'] in {'STOP', 'MARKET'}:
-                evidence = [x for x in snap['orders'] + snap['order_history']
+                evidence = index.entry_orders(cid, cmd.get('result', {}).get('order_id')) if index else [x for x in snap['orders'] + snap['order_history']
                             if x.get('command_id') == cid or
                             (cmd.get('result', {}).get('order_id') and
                              x['id'] == cmd['result']['order_id'])]
                 for order in evidence:
                     cmd['order_id'] = order['id']
                     cmd['status'] = order['status']
-                if any(d.get('command_id') == cid or
+                if (bool(index.ins_command.get(cid) or (cmd.get('order_id') and index.ins_order.get(cmd['order_id']))) if index else any(d.get('command_id') == cid or
                        (cmd.get('order_id') and d['order_id'] == cmd['order_id'])
-                       for d in snap['deals'] if d['entry'] == 'IN'):
+                       for d in snap['deals'] if d['entry'] == 'IN')):
                     cmd['status'] = 'FILLED'
             elif cmd['kind'] == 'CANCEL':
-                if any(o['id'] == cmd['order_id'] and o['status'] in {'CANCELLED', 'FILLED', 'REJECTED'}
-                       for o in snap['order_history']):
+                if (cmd['order_id'] in index.terminal_orders if index else any(o['id'] == cmd['order_id'] and o['status'] in {'CANCELLED', 'FILLED', 'REJECTED'}
+                       for o in snap['order_history'])):
                     cmd['status'] = 'DONE'
             elif cmd['kind'] == 'MODIFY':
                 if any(p['id'] == cmd['position_id'] and D(p['sl']) == D(cmd['sl'])
-                       and D(p['tp']) == D(cmd['tp']) for p in snap['positions']):
+                       and D(p['tp']) == D(cmd['tp']) for p in (index.live.get(cmd['position_id'], ()) if index else snap['positions'])):
                     cmd['status'] = 'DONE'
                 if any(d['position_id'] == cmd['position_id'] and d['entry'] == 'OUT'
                        and D(d.get('sl', '0')) == D(cmd['sl'])
-                       and D(d.get('tp', '0')) == D(cmd['tp']) for d in snap['deals']):
+                       and D(d.get('tp', '0')) == D(cmd['tp']) for d in (index.outs_position.get(cmd['position_id'], ()) if index else snap['deals'])):
                     cmd['status'] = 'DONE'
         self.save('broker_reconciled')
 

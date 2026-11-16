@@ -168,11 +168,13 @@ class BasketController(Controller):
         else:self.pause(reason)
 
     def _observe(self,snap):
+        from .paper_evidence_index import paper_index
+        index=paper_index(self,snap)
         c=self.state['cycle'];changed=False
         if any(o.get('command_id') not in c['entries'] and not any(self.state['commands'][cid].get('order_id')==o['id'] for cid in c['entries']) for o in snap['orders']):self._halt(snap,'UNKNOWN_ORDER_IDENTITY');return False
         for g in c['groups']:
             for cid in g['commands']:
-                cmd=self.state['commands'][cid];ins=[d for d in snap['deals'] if d['entry']=='IN' and d.get('command_id')==cid]
+                cmd=self.state['commands'][cid];ins=index.ins_command.get(cid,[]) if index else [d for d in snap['deals'] if d['entry']=='IN' and d.get('command_id')==cid]
                 if not ins:continue
                 ids={d['position_id'] for d in ins}
                 if len(ids)!=1 or sum((number(d['volume']) for d in ins),D(0))!=number(cmd['size']):self._halt(snap,'PARTIAL_FILL_OR_NONINDEPENDENT_TICKET');return False
@@ -190,8 +192,8 @@ class BasketController(Controller):
         if any(p['id'] not in c['tickets'] for p in snap['positions']):self._halt(snap,'UNKNOWN_POSITION_IDENTITY');return False
         if len({t['command_id'] for t in c['tickets'].values()})!=len(c['tickets']):self._halt(snap,'MERGED_TICKETS_UNSUPPORTED');return False
         for pid,t in c['tickets'].items():
-            exits=[d for d in snap['deals'] if d['entry']=='OUT' and d['position_id']==pid]
-            live=next((p for p in snap['positions'] if p['id']==pid),None)
+            exits=index.outs_position.get(pid,[]) if index else [d for d in snap['deals'] if d['entry']=='OUT' and d['position_id']==pid]
+            live=next(iter(index.live.get(pid,[])),None) if index else next((p for p in snap['positions'] if p['id']==pid),None)
             if live and number(live['size'])!=number(t['size']):self._halt(snap,'PARTIAL_POSITION_CHANGE');return False
             if exits and not t['closed']:
                 if live or sum((number(d['volume']) for d in exits),D(0))!=number(t['size']):self._halt(snap,'PARTIAL_CLOSE_UNSUPPORTED');return False
@@ -215,9 +217,11 @@ class BasketController(Controller):
 
     def _reconcile_commands(self,snap):
         super()._reconcile_commands(snap)
+        from .paper_evidence_index import paper_index
+        index=paper_index(self,snap)
         for cmd in self.state['commands'].values():
             if cmd['kind']=='CLOSE' and cmd['status'] not in TERMINAL:
-                exits=[d for d in snap['deals'] if d['entry']=='OUT' and d.get('close_command_id')==cmd['id'] and d['position_id']==cmd['position_id']]
+                exits=[d for d in (index.outs_position.get(cmd['position_id'],[]) if index else snap['deals']) if d['entry']=='OUT' and d.get('close_command_id')==cmd['id'] and d['position_id']==cmd['position_id']]
                 if not any(p['id']==cmd['position_id'] for p in snap['positions']) and sum((number(d['volume']) for d in exits),D(0))==number(cmd['size']):cmd['status']='DONE'
         self.save('basket_close_reconciliation')
 
