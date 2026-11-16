@@ -70,7 +70,7 @@ class Fake:
 def build_setup(tmp_path):
     (tmp_path / 'data').mkdir()
     p.shared.save(tmp_path / 'application.json', dict(format=1, role='paper'))
-    p.shared.save(tmp_path / 'managed-install.json', dict(format=2, role='paper', layout='independent_roots_v1'))
+    p.shared.save(tmp_path / 'managed-install.json', dict(format=2, role='paper', layout='sl_overlap_roots_v1'))
     p.shared.save(tmp_path / 'data/service.json', dict(backend='paper_mt5_quotes_v1', enable_trading=False, web=dict(host='127.0.0.1', port=8766, enabled=True, password='x' * 32)))
     return p.Setup(tmp_path, Fake())
 

@@ -14,7 +14,7 @@ class PaperCommandMailbox(OwnerMailbox):
     def _require_fresh(action, view, *, stage=None, queue_age=None):
         # Local obligations must be current. Quote availability/validity is checked
         # by the owner against its own persisted PAPER state, not an HTTP cache.
-        if action in ({'type':'command','text':'/stop'}, {'type':'command','text':'/resume_time'}):
+        if action in ({'type':'command','text':'/stop'}, {'type':'command','text':'/resume_time'}, {'type':'command','text':'/sync_mt5_time'}):
             return
         if not view.get('snapshot_freshness', {}).get('fresh'):
             raise SnapshotStale('SNAPSHOT_STALE', stage=stage,
@@ -45,7 +45,7 @@ def command_scope(session, action):
     if exchange.backend_id != 'paper_mt5_quotes_v1' or controller.broker is not exchange:
         reject('Последняя котировка доступна только в PAPER.')
     active = getattr(controller, '_active_control_id', None)
-    safe=action in ({'type':'command','text':'/stop'},{'type':'command','text':'/resume_time'})
+    safe=action in ({'type':'command','text':'/stop'},{'type':'command','text':'/resume_time'}, {'type':'command','text':'/sync_mt5_time'})
     if not safe and (any(r.get('status')=='UNKNOWN' and rid != active for rid,r in controller.state.get('control_receipts', {}).items()) or any(cmd['status']=='UNKNOWN' for cmd in controller.state['commands'].values())):
         reject('Предыдущий исход UNKNOWN: повтор и новые команды запрещены до сверки.')
     cycle=controller.state.get('cycle') or {}
@@ -69,7 +69,7 @@ def advance_command(session, action):
     if kind == 'paper_flatten' and bot.state.get('cycle'):
         snap=bot.snapshot();bot._reconcile_commands(snap);bot._observe(snap)
         bot.state['phase']='PAUSED_CYCLE';bot.save('paper_explicit_close_observed');return
-    if kind in {'paper_interrupt','paper_flatten','paper_resume','paper_costs'}:return
+    if kind in {'paper_interrupt','paper_flatten','paper_resume','paper_costs','overlap_thresholds'}:return
     if kind == 'command':return
     for _ in range(12):
         c = bot.state.get('cycle')

@@ -43,13 +43,13 @@ class InstallerTests(unittest.TestCase):
 
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
-        self.root=Path(self.tmp.name)/'AI_IMPULS_PAPER';self.urls=[];self.current=self.sha
+        self.root=Path(self.tmp.name)/'AI_IMPULS_PAPER_SL_OVERLAP';self.urls=[];self.current=self.sha
         def fetch(url,limit=installer.MAX_DOWNLOAD):
             self.urls.append(url)
             self.assertIn('Mihail9990/Simylator',url)
             if '/git/ref/' in url:
-                self.assertTrue(url.endswith('/heads/main'))
-                return json.dumps(dict(ref='refs/heads/main',object=dict(type='commit',sha=self.current))).encode()
+                self.assertTrue(url.endswith('/heads/sl-overlap-recovery'))
+                return json.dumps(dict(ref='refs/heads/sl-overlap-recovery',object=dict(type='commit',sha=self.current))).encode()
             self.assertTrue(url.endswith('/archive/'+self.current+'.zip'))
             return self.archive if self.current==self.sha else self.archive2
         self.manager=app.IndependentManager(self.root,'paper',fetch=fetch,report=lambda text:None)
@@ -75,7 +75,7 @@ class InstallerTests(unittest.TestCase):
         from test_tradfi_paper import Reader
         self.root.mkdir();old='c'*40
         installer.atomic_json(self.root/'application.json',dict(format=1,role='paper'))
-        installer.atomic_json(self.root/'managed-install.json',dict(format=2,role='paper',layout='independent_roots_v1'))
+        installer.atomic_json(self.root/'managed-install.json',dict(format=2,role='paper',layout='sl_overlap_roots_v1'))
         installer.atomic_json(self.root/'current.json',dict(current=old,previous=None))
         cfg=dict(backend='paper_mt5_quotes_v1',enable_trading=False,state_file=str(self.root/'data/state.sqlite3'),log_file=str(self.root/'data/runtime.log'),web=dict(host='127.0.0.1',port=8766,enabled=True,password='existing-secret'*3,public_origin='https://paper.example.com'))
         installer.atomic_json(self.root/'data/service.json',cfg)
@@ -104,8 +104,41 @@ class InstallerTests(unittest.TestCase):
         code=Path(self.tmp.name)/'code';code.mkdir()
         with self.assertRaises(installer.SetupError):installer.extract_archive(release_zip(self.sha),code,self.sha2)
         self.manager.install();code=self.manager.current_release()/'code'
-        installer.atomic_json(code/'independent-install-contract.json',dict(format=1,roles=['live','paper'],layout='independent_roots_v1'))
+        installer.atomic_json(code/'independent-install-contract.json',dict(format=1,roles=['live','paper'],layout='sl_overlap_roots_v1'))
         with self.assertRaises(installer.SetupError):app.validate_code(code)
+
+    def test_variant_rejects_main_ref_and_main_installation_without_changes(self):
+        wrong_ref = lambda *args: json.dumps(dict(ref='refs/heads/main', object=dict(type='commit', sha=self.sha))).encode()
+        with self.assertRaises(installer.SetupError):installer.latest_sha(wrong_ref)
+        self.root.mkdir()
+        installer.atomic_json(self.root/'application.json', dict(format=1, role='paper'))
+        installer.atomic_json(self.root/'managed-install.json', dict(format=2, role='paper', layout='independent_roots_v1'))
+        installer.atomic_json(self.root/'current.json', dict(current='c'*40, previous=None))
+        original = {p.name: p.read_bytes() for p in self.root.iterdir()}
+        with self.assertRaises(installer.SetupError):self.manager.install()
+        self.assertEqual(original, {p.name: p.read_bytes() for p in self.root.iterdir() if p.suffix=='.json'})
+        self.assertEqual(self.urls, [])
+
+    def test_variant_rejects_main_release_contract_on_update(self):
+        self.manager.install()
+        before=self.manager.pointer()
+        broken=io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(self.archive2)) as src, zipfile.ZipFile(broken, 'w', zipfile.ZIP_DEFLATED) as dst:
+            for info in src.infolist():
+                data=src.read(info)
+                if info.filename.endswith('/managed_release.json'):
+                    contract=json.loads(data);contract.pop('variant');data=json.dumps(contract).encode()
+                dst.writestr(info.filename,data)
+        self.archive2=broken.getvalue();self.current=self.sha2
+        with self.assertRaises(installer.SetupError):self.manager.install()
+        self.assertEqual(self.manager.pointer(),before)
+
+    def test_variant_root_and_contract_are_distinct(self):
+        with patch.dict(os.environ, {'LOCALAPPDATA':str(self.tmp.name)}):
+            self.assertEqual(app.default_root('paper').name, 'AI_IMPULS_PAPER_SL_OVERLAP')
+        self.assertEqual(installer.BRANCH,'sl-overlap-recovery')
+        self.assertEqual(installer.CONTRACT['variant'],'sl_overlap_recovery_v1')
+        self.assertEqual(app.CONTRACT['layout'],'sl_overlap_roots_v1')
 
     def test_active_process_lock_blocks_update_and_external_state_is_refused(self):
         self.manager.install();before=self.manager.pointer()

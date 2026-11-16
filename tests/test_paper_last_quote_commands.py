@@ -90,7 +90,7 @@ class LastQuoteCommands(unittest.TestCase):
         self.start();req=self.request(dict(type='cancel_initial',cycle_id=self.bot.state['cycle']['id'],expected_orders=[self.p['orders'][0]['id']]))
         self.session.mailbox.submit(req);self.reader.tick('4000.9','4001');self.session.step()
         self.assertEqual(self.bot.state['control_receipts'][req['id']]['status'],'REJECTED')
-        self.assertEqual(len(self.p['positions']),1);self.assertFalse(self.p['orders'])
+        self.assertEqual(len(self.p['positions']),1);self.assertEqual(len(self.p['orders']),3)
     def test_atomic_cancel_fault_before_commit_restart_never_replays_unknown(self):
         self.start();self.stale();req=self.request(dict(type='cancel_initial',cycle_id=self.bot.state['cycle']['id'],expected_orders=[self.p['orders'][0]['id']]))
         self.session.mailbox.submit(req)

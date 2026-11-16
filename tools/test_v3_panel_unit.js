@@ -170,7 +170,7 @@ async function main(){
  assert(!elements['recovery-mode']);assert(!elements['save-recovery-mode']);assert(!elements['manual-close-submit']);
  assert(!src.includes("type:'recovery_mode'"));assert(!src.includes("type:'manual_close'"));
  assert(!html.includes('value="V1"'));assert(!html.includes('V3.3'));
- for(const id of ['start','stop','resume','reset','cancel-initial','own-entry-sl','reverse-enable','reverse-disable','save-settings','save-tp-grid','writeoff-recovery','paper-flatten','logs-download'])assert(elements[id],'retained control '+id);
+ for(const id of ['start','stop','sync-mt5-time','reset','cancel-initial','own-entry-sl','reverse-enable','reverse-disable','save-settings','save-tp-grid','writeoff-recovery','paper-flatten','logs-download'])assert(elements[id],'retained control '+id);
  ctx.view=structuredClone(base);vm.runInContext('v3Render()',ctx);
  // Settings still submit the full server schema without exposing retired range/lot inputs.
  ctx.view.settings={EXPANSION_DISTANCE:'2',TICKET_SIZE:'0.03',INITIAL_SIZE:'0.01',BASKET_COUNT:6};

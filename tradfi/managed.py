@@ -36,7 +36,7 @@ def runtime_guard(state_file,*,instance='paper'):
             owned.enter_context(lock(root/('instance-'+instance+'.lock')))
             code=Path(__file__).resolve().parent.parent
             installation=read_json(root/'managed-install.json')
-            independent=installation==dict(format=2,role=instance,layout='independent_roots_v1')
+            independent=installation==dict(format=2,role=instance,layout='sl_overlap_roots_v1')
             if not independent or read_json(root/'current.json')['current']!=code.parent.name:
                 raise SetupError('Managed release is not current')
             application=root/'application.json'

@@ -2,7 +2,7 @@
 from copy import deepcopy
 from decimal import Decimal as D
 import hashlib,json,uuid,time
-from .candle_recovery import CandleRecoveryController
+from .sl_overlap_recovery import SLOverlapRecoveryController as CandleRecoveryController
 from .control import ActionRejected,ActionGateway,OwnerMailbox
 from .broker import Spec
 from .settings import number
@@ -209,9 +209,12 @@ class PaperSession:
             for cmd in s['commands'].values():
                 if cmd['status'] not in TERMINAL:cmd['status']='OBSOLETE'
             s.update(cycle=None,phase='WAIT_START',stop=True);self.controller.save('paper_manual_reset');return
-        if a==dict(type='command',text='/resume_time'):
+        if a in (dict(type='command',text='/resume_time'),dict(type='command',text='/sync_mt5_time')):
             if getattr(self.reader,'market_time_mode',None)=='mt5_raw_v1':
-                self.reader.align_time()
+                try:self.reader.align_time()
+                except (ValueError,OSError,TimeoutError):
+                    raise ActionRejected('Не удалось получить котировку MT5 для отображаемых часов.',
+                        public_message='Нужна доступная корректная котировка MT5. Настройки и торговый режим не изменены.') from None
             elif self.reader.safety.check():raise ActionRejected('Ожидаются проверенные свежие данные MT5')
             return
         if self.exchange.p['paused_gap'] and a==dict(type='command',text='/stop'):
@@ -273,6 +276,10 @@ class PaperSession:
         s=self.controller.state;c=s.get('cycle') or {};snap=deepcopy(self.snapshot) if self.snapshot else {}
         snap.update({k:deepcopy(self.exchange.p[k]) for k in ('orders','positions')})
         v=self.presentation.basket_view(s,c,snap,self.reader.view())
+        if getattr(self.reader,'market_time_mode',None)=='mt5_raw_v1':
+            v['time_status'].update(display_clock=self.reader.display_clock.view(),
+                market_time_mode='mt5_raw_v1',can_switch_raw=False,
+                switch_reason='Исходное время MT5 уже включено в симуляторе.')
         from .paper_position_history import position_history
         history=position_history(self.exchange.p,s.get('currency'),bool(s.get('completed')),s.get('commands',{}))
         v['position_history']=history['position_history'];v['metrics'].update(history['metrics'])

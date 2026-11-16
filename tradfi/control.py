@@ -205,7 +205,7 @@ class OwnerMailbox:
     def _require_fresh(action, view, *, stage=None, queue_age=None):
         # These exact commands stop new exposure or recheck time. They do not
         # authorize a new entry, quote-based close, resume, edit or settlement.
-        if action in ({'type': 'command', 'text': '/stop'}, {'type': 'command', 'text': '/resume_time'}):
+        if action in ({'type': 'command', 'text': '/stop'}, {'type': 'command', 'text': '/resume_time'}, {'type': 'command', 'text': '/sync_mt5_time'}):
             return
         evidence=dict(stage=stage, snapshot_age=view.get('snapshot_freshness',{}).get('age_seconds'), quote_age=(view.get('feed') or {}).get('age_seconds'), queue_age=queue_age)
         if not view.get('snapshot_freshness', {}).get('fresh'):
@@ -227,7 +227,7 @@ class OwnerMailbox:
                     # particular an UNKNOWN receipt is never permission to retry.
                     return dict(id=request['id'], **{k: previous[k] for k in ('status', 'revision')})
                 if ('context_token' in request and request['context_token'] != self._view.get('command_context_token')
-                        and request['action'] not in ({'type':'command','text':'/stop'}, {'type':'command','text':'/resume_time'})):
+                        and request['action'] not in ({'type':'command','text':'/stop'}, {'type':'command','text':'/resume_time'}, {'type':'command','text':'/sync_mt5_time'})):
                     raise SnapshotStale('CONTEXT_CHANGED', stage='submit')
                 self._require_fresh(request['action'], self._guard_view(self.monotonic()), stage='submit')
                 feed = self._view.get('feed') or {}
@@ -263,7 +263,7 @@ class OwnerMailbox:
         now = self.monotonic()
         queue_age = self._nonnegative(now-queued_at)
         if self.current_execution_view is not None and context is not None:
-            if action in ({'type':'command','text':'/stop'}, {'type':'command','text':'/resume_time'}):
+            if action in ({'type':'command','text':'/stop'}, {'type':'command','text':'/resume_time'}, {'type':'command','text':'/sync_mt5_time'}):
                 return
             if queue_age is None or queue_age >= self.max_queue_age_seconds:
                 raise SnapshotStale('QUEUE_EXPIRED', stage='execution_queue', queue_age=queue_age)

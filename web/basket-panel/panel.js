@@ -24,7 +24,7 @@
  function clearPending(){pending=null;pendingScope=null;localStorage.removeItem(storageKey('request'));localStorage.removeItem(storageKey('scope'));}
  async function send(action,revision=view?.revision,scope=view?.scope){
   const contextToken=view?.command_context_token;
-  const safeRecovery=action.type==='command'&&['/stop','/resume_time'].includes(action.text);
+  const safeRecovery=action.type==='command'&&['/stop','/resume_time','/sync_mt5_time'].includes(action.text);
   if(busy||pending)throw Error('Предыдущий исход не сверён. Повтор запрещён.');
   if(!view||scope!==view.scope)throw Error('Контекст изменился; обновите данные.');
   if(!safeRecovery&&(!snapshotCurrent()||!commandQuoteReady(action))){
@@ -60,7 +60,7 @@
    if(busy||pending)throw Error('Предыдущий исход не сверён. Повтор запрещён.');
    const revision=view.revision,scope=view.scope,context=commandContext(view);
    if(!confirm(message))return;
-   if(!['/stop','/resume_time'].includes(text)){
+   if(!['/stop','/resume_time','/sync_mt5_time'].includes(text)){
     // A modal pauses polling. Await any old request, then require a new GET.
     if(polling)await pollTask;
     await poll();
@@ -84,10 +84,37 @@
  $('reverse-enable').onclick=()=>reverseLadder(true);$('reverse-disable').onclick=()=>reverseLadder(false);
  $('start').onclick=()=>command('/start','Запустить следование закрытым M1 и восстановление корзинами?');
  $('stop').onclick=()=>command('/stop','Остановить новые входы и отменить ожидающие ордера? Открытые билеты сохраняют SL/TP. Долг не списывается.');
- $('resume').onclick=()=>command('/resume_time','Сверить отображаемое время с последним тиком MT5? Время VPS не используется для вычета смещения.');
  $('reset').onclick=()=>command('/reset_manual','Подтвердить ручную сверку всех ордеров и билетов? Требуются доказанное закрытие и отсутствие неопределённости. Долг сохраняется.');
  $('login-button').onclick=async()=>{const password=$('password').value;$('password').value='';try{const r=await fetch('/api/login',{method:'POST',headers:{...headers(),'Content-Type':'application/json'},body:JSON.stringify({password}),signal:AbortSignal.timeout(3000)});if(!r.ok)throw Error('Вход отклонён');$('login-error').textContent='';await poll();}catch(e){$('login-error').textContent=e.message;}};
  $('logout').onclick=async()=>{await fetch('/api/logout',{method:'POST',headers:{...headers(),'Content-Type':'application/json'},body:'{}'});location.reload();};
+ // MT5 clock controls are separate from manual reconciliation and trade readiness.
+ let mt5DisplayAnchor=null;
+ const mt5TimeActionBlocked=()=>!view||busy||!!pending;
+ const mt5DisplayNumber=value=>typeof value==='number'&&Number.isFinite(value)&&value>0&&value<8640000000000;
+ function mt5DisplayNow(){try{const value=performance.now();return typeof value==='number'&&Number.isFinite(value)&&value>=0?value:null;}catch{return null;}}
+ function observeMt5DisplayClock(){
+  mt5DisplayAnchor=null;const clock=view?.time_status?.display_clock,now=mt5DisplayNow();
+  if(v3Fresh&&clock?.status==='ALIGNED'&&clock.timestamp_semantics==='BROKER_RAW'&&clock.verified_utc===false&&clock.source_connected===true&&mt5DisplayNumber(clock.estimated_broker_time)&&now!==null)mt5DisplayAnchor={value:clock.estimated_broker_time,received:now,scope:view.scope};
+ }
+ function renderMt5TimeControls(){
+  const write=(id,text)=>{if($(id).textContent!==text)$(id).textContent=text;};
+  const clock=view?.time_status?.display_clock,raw=view?.time_status?.market_time_mode==='mt5_raw_v1',now=mt5DisplayNow();
+  $('sync-mt5-time').disabled=mt5TimeActionBlocked();
+  write('mt5-time-mode',raw?'Временная шкала: исходное время MT5, без проверки давности.':'Временная шкала торговли не переключена на исходное время MT5.');
+  let stamp='—',status=!v3Fresh?'Нет свежего снимка сервиса. Оценка времени приостановлена.':clock?.status==='DISCONNECTED'||clock?.source_connected===false?'Нет связи с MT5. После подключения выполните сверку снова.':'Для оценки времени выполните сверку.';
+  if(v3Fresh&&mt5DisplayAnchor&&mt5DisplayAnchor.scope===view?.scope&&clock?.status==='ALIGNED'&&clock.source_connected===true&&now!==null&&now>=mt5DisplayAnchor.received){
+   const value=mt5DisplayAnchor.value+(now-mt5DisplayAnchor.received)/1000;
+   if(mt5DisplayNumber(value)){stamp=new Date(value*1000).toISOString().replace('T',' ').slice(0,19);status='Оценка по последнему доступному тику и монотонному таймеру. Давность тика не проверяется.';}
+  }
+  write('mt5-display-clock','Оценка времени MT5: '+stamp);write('mt5-clock-status',status);
+ }
+ async function runMt5TimeCommand(text,message,blocked){
+  if(blocked())return;const revision=view.revision,scope=view.scope;
+  if(!confirm(message))return;
+  if(blocked()||view.revision!==revision||view.scope!==scope){error('Контекст изменился; обновите данные и подтвердите действие заново.');return;}
+  try{await send({type:'command',text},revision,scope);}catch(e){error(e.message);}
+ }
+ $('sync-mt5-time').onclick=()=>runMt5TimeCommand('/sync_mt5_time','Сверить отображаемые часы по последнему доступному тику MT5? Возраст тика не проверяется: тик может быть задержанным. Далее показывается оценка времени MT5 по монотонному таймеру. Котировки, свечи, торговый режим и часы Windows не меняются. После перезапуска или переподключения сверку нужно повторить.',mt5TimeActionBlocked);
  // Activity uses controller snapshots and receipts, never inferred fills.
  function actionReceiptText(status,reason){
   if(status==='APPLIED')return 'Команда обработана контроллером; исполнение и позиции проверяются отдельно по снимку.';
@@ -149,7 +176,7 @@
  const snapshotCurrent=()=>v3Fresh&&performance.now()<snapshotDeadline;
  const quoteCurrent=()=>snapshotCurrent()&&(view?.feed?.timestamp_semantics==='BROKER_RAW'?view?.feed?.status==='OBSERVED':view?.feed?.status==='FRESH'&&feedUtcVerified()&&performance.now()<quoteDeadline);
  // PAPER commands use only the last verified MT5 quote, never a fabricated price.
- const paperPriceFree=action=>(action?.type==='command'&&['/stop','/resume_time'].includes(action.text))||['cancel_initial','v3_cancel_entry','v3_cancel_link','v3_cancel_request','paper_costs','candle_recovery_settings','candle_recovery_resume'].includes(action?.type);
+ const paperPriceFree=action=>(action?.type==='command'&&['/stop','/resume_time','/sync_mt5_time'].includes(action.text))||['cancel_initial','v3_cancel_entry','v3_cancel_link','v3_cancel_request','paper_costs','overlap_thresholds','candle_recovery_settings','candle_recovery_resume'].includes(action?.type);
  function paperQuoteAvailable(q=view?.paper?.command_quote){
   return q?.available===true&&['LAST_VERIFIED_MT5','LAST_OBSERVED_MT5'].includes(q.source)&&[q.bid,q.ask].every(x=>['string','number'].includes(typeof x)&&x!==''&&Number.isFinite(Number(x))&&Number(x)>0)&&Number(q.ask)>=Number(q.bid)&&typeof q.timestamp==='number'&&Number.isFinite(q.timestamp)&&q.timestamp>0&&Number.isFinite(new Date(q.timestamp*1000).getTime())&&(q.source==='LAST_OBSERVED_MT5'||(typeof q.age_seconds==='number'&&Number.isFinite(q.age_seconds)&&q.age_seconds>=-2));
  }
@@ -212,9 +239,9 @@
  function renderProfiles(){
   const config=profileConfig(),selected=view?.selected_recovery_profile,available=!!config?.profiles?.length,blocked=v3Blocked()||!v3Enabled()||!available;
   const key=JSON.stringify(config);if(key!==profileOptionsKey){profileOptionsKey=key;$('recovery-profile-select').replaceChildren();for(const p of config?.profiles??[]){const option=document.createElement('option');option.value=p.id;option.textContent=profileSummary(p);$('recovery-profile-select').append(option);}$('recovery-profile-select').value=config?.selected_profile_id??'';}
-  $('recovery-selected-summary').textContent='Следующая корзина: '+profileSummary(selected);
+  $('recovery-selected-summary').textContent=(view?.candle_recovery?.variant==='sl-overlap-recovery-v1'?'Профиль для ручного продолжения: ':'Следующая корзина: ')+profileSummary(selected);
   $('recovery-profile-summary').textContent='Профили RECOVERY · '+profileSummary(selected);
-  $('recovery-current-summary').textContent=(view?.current_recovery_profiles??[]).map(p=>'Зафиксировано · '+(p.group_id??'заявка')+': '+profileSummary(p)).join('\n')||'Нет активной или ожидающей корзины RECOVERY.';
+  $('recovery-current-summary').textContent=(view?.current_recovery_profiles??[]).map(p=>(view?.candle_recovery?.variant==='sl-overlap-recovery-v1'?'Текущая корзина · ':'Зафиксировано · ')+(p.group_id??'заявка')+': '+profileSummary(p)).join('\n')||'Нет активной или ожидающей корзины RECOVERY.';
   $('initial-settings-summary').textContent='Начальный вход · '+(view?.settings?.INITIAL_SIZE??'—')+' лота · TP '+(view?.settings?.INITIAL_TP_DISTANCE??'—')+' · SL '+(view?.settings?.INITIAL_SL_DISTANCE??'—');
   $('recovery-debt-summary').textContent='Остаток RECOVERY · '+(view?.debt??'—')+' UST';
   $('recovery-sl-summary').textContent='SL новых корзин · '+(config?.recovery_sl_distance??'—');
@@ -223,16 +250,53 @@
   if(!available){$('candle-resume').disabled=true;if(!view?.v3_link)$('v3-link-toggle').disabled=true;}
  }
  const positiveDecimal=(value,label)=>{const raw=String(value).trim();if(!/^\d+(\.\d+)?$/.test(raw)||!Number.isFinite(Number(raw))||Number(raw)<=0)throw Error(label+': требуется положительное десятичное число без округления.');return raw;};
- async function saveProfileConfig(config,message){if(v3Blocked()||!v3Enabled()||!profileConfig())return;const action={type:'recovery_profiles',cycle_id:view.cycle_id,...config},revision=view.revision,scope=view.scope;if(!confirm(message+'\nИзменится только следующая корзина. Открытые, ожидающие и запланированные заявки сохраняют свой профиль и SL.'))return;await send(action,revision,scope);}
+ async function saveProfileConfig(config,message){if(v3Blocked()||!v3Enabled()||!profileConfig())return;const action={type:'recovery_profiles',cycle_id:view.cycle_id,...config},revision=view.revision,scope=view.scope;if(!confirm(message+(view?.candle_recovery?.variant==='sl-overlap-recovery-v1'?'\nНеисполненные лестницы автоматически пересчитываются по прогнозу RECOVERY с учётом SL оставшихся позиций и частичных TP. Цена входа остаётся на прежнем уровне. Объём уже открытых позиций не меняется.':'\nИзменится только следующая корзина. Открытые, ожидающие и запланированные заявки сохраняют свой профиль и SL.')))return;await send(action,revision,scope);}
  function checkProfileRemovals(){if(profileRemoved.size&&profileRemovalSource!==JSON.stringify(profileConfig()))throw Error('Список изменился. Загрузите актуальные настройки и повторите исключения.');}
  $('recovery-profile-remove').onclick=()=>{const id=$('recovery-profile-select').value;if(!profileConfig()?.profiles.some(p=>p.id===id))return;if(!profileRemoved.size)profileRemovalSource=JSON.stringify(profileConfig());if(profileRemoved.has(id))profileRemoved.delete(id);else profileRemoved.add(id);$('recovery-profile-removals').textContent='Исключены в черновике: '+(profileConfig().profiles.filter(p=>profileRemoved.has(p.id)).map(p=>p.name).join(', ')||'нет')+'. Повторное нажатие возвращает профиль. Сохраните исключения или профиль для применения.';};
  $('recovery-profile-save-list').onclick=async()=>{try{checkProfileRemovals();const config=profileConfig(),profiles=config.profiles.filter(p=>!profileRemoved.has(p.id));if(!profiles.length)throw Error('Оставьте хотя бы один профиль или сохраните новый.');const selected_profile_id=profiles.some(p=>p.id===config.selected_profile_id)?config.selected_profile_id:profiles[0].id;await saveProfileConfig({...config,profiles,selected_profile_id},'Сохранить список профилей?\nОстанутся: '+profiles.map(p=>p.name).join(', ')+'\nВыбран: '+profiles.find(p=>p.id===selected_profile_id).name);}catch(e){error(e.message);}};
  $('recovery-profile-edit').onclick=()=>openProfileDraft(profileConfig()?.profiles.find(p=>p.id===$('recovery-profile-select').value));
  $('recovery-profile-new').onclick=()=>openProfileDraft(null);
  $('recovery-add-stage').onclick=()=>{if(profileRows.length<20){profileRows.push({volume:'0.01',tp_distance:''});renderProfileRows();}};
- $('recovery-profile-apply').onclick=async()=>{if(v3Blocked()||!v3Enabled())return;try{const p=profileConfig()?.profiles.find(p=>p.id===$('recovery-profile-select').value);if(!p)throw Error('Выберите сохранённый профиль.');const revision=view.revision,scope=view.scope;if(!confirm('Выбрать для следующих корзин?\n'+profileDetails(p)+'\nОткрытые и ожидающие заявки не изменятся.'))return;await send({type:'recovery_profile_select',cycle_id:view.cycle_id,profile_id:p.id},revision,scope);}catch(e){error(e.message);}};
+ $('recovery-profile-apply').onclick=async()=>{if(v3Blocked()||!v3Enabled())return;try{const p=profileConfig()?.profiles.find(p=>p.id===$('recovery-profile-select').value);if(!p)throw Error('Выберите сохранённый профиль.');const revision=view.revision,scope=view.scope;if(!confirm((view?.candle_recovery?.variant==='sl-overlap-recovery-v1'?'Выбрать профиль для ручного продолжения?\n':'Выбрать для следующих корзин?\n')+profileDetails(p)+(view?.candle_recovery?.variant==='sl-overlap-recovery-v1'?'\nАвтоматический выбор встречных лестниц задаётся таблицей диапазонов убытка. Объём открытых позиций не меняется.':'\nОткрытые и ожидающие заявки не изменятся.')))return;await send({type:'recovery_profile_select',cycle_id:view.cycle_id,profile_id:p.id},revision,scope);}catch(e){error(e.message);}};
  $('recovery-profile-save').onclick=async()=>{try{if(profileSourceKey!==JSON.stringify(profileConfig()))throw Error('Профили изменились. Загрузите профиль заново перед сохранением.');const name=$('recovery-profile-name').value.trim();if(!name||name.length>80)throw Error('Название: от 1 до 80 символов.');if(profileRows.length<1||profileRows.length>20)throw Error('Нужно от 1 до 20 ступеней.');const stages=profileRows.map((s,i)=>({volume:positiveDecimal(s.volume,'Объём '+(i+1)),tp_distance:positiveDecimal(s.tp_distance,'TP '+(i+1))}));const p={id:profileDraft??('profile-'+Date.now().toString(36)),name,stages},config=profileConfig();checkProfileRemovals();const profiles=config.profiles.filter(x=>x.id!==p.id&&!profileRemoved.has(x.id)).concat([p]);await saveProfileConfig({...config,profiles,selected_profile_id:p.id},'Сохранить и выбрать профиль?\n'+profileDetails(p));}catch(e){error(e.message);}};
  $('recovery-save-sl').onclick=async()=>{try{await saveProfileConfig({...profileConfig(),recovery_sl_distance:positiveDecimal($('recovery-sl-distance').value,'SL')},'Сохранить SL для новых корзин: '+$('recovery-sl-distance').value+'?');}catch(e){error(e.message);}};
+ // Threshold drafts are never overwritten by polling while the owner edits.
+ let overlapRows=[],overlapSource='',overlapProfilesSource='',overlapBaseline='';
+ const overlapVariant=()=>view?.candle_recovery?.variant==='sl-overlap-recovery-v1';
+ const overlapConfig=()=>view?.candle_recovery?.thresholds??[];
+ const overlapDirty=()=>JSON.stringify(overlapRows)!==overlapBaseline;
+ function renderOverlapRows(){
+  $('overlap-threshold-rows').replaceChildren();
+  overlapRows.forEach((item,i)=>{
+   const row=document.createElement('div');row.className='overlap-threshold-row';
+   const label=document.createElement('label');label.textContent=i===overlapRows.length-1?'До включительно, $':'До (не включая), $';
+   const input=document.createElement('input');input.inputMode='decimal';input.value=item.upper;input.setAttribute('aria-label','Верхняя граница убытка '+(i+1));input.oninput=()=>{item.upper=input.value;};label.append(input);row.append(label);
+   const profileLabel=document.createElement('label');profileLabel.textContent='Профиль';const select=document.createElement('select');select.setAttribute('aria-label','Профиль диапазона '+(i+1));
+   for(const p of profileConfig()?.profiles??[]){const option=document.createElement('option');option.value=p.id;option.textContent=profileSummary(p);select.append(option);}
+   select.value=item.profile_id;select.onchange=()=>{item.profile_id=select.value;};profileLabel.append(select);row.append(profileLabel);$('overlap-threshold-rows').append(row);
+  });
+ }
+ function loadOverlapDraft(){
+  overlapRows=overlapConfig().map(x=>({upper:String(x.upper),profile_id:x.profile_id}));overlapSource=JSON.stringify(overlapConfig());overlapProfilesSource=JSON.stringify(profileConfig());overlapBaseline=JSON.stringify(overlapRows);renderOverlapRows();
+ }
+ function overlapAction(){
+  if(overlapSource!==JSON.stringify(overlapConfig())||overlapProfilesSource!==JSON.stringify(profileConfig()))throw Error('Диапазоны или профили изменились. Загрузите актуальные диапазоны перед сохранением.');
+  let previous=0;
+  const thresholds=overlapRows.map((item,i)=>{const upper=positiveDecimal(String(item.upper).replace(',','.'),'Граница '+(i+1));if(Number(upper)<=previous)throw Error('Границы должны строго возрастать.');previous=Number(upper);if(!profileConfig()?.profiles.some(p=>p.id===item.profile_id))throw Error('Выберите сохранённый профиль для каждого диапазона.');return {upper,profile_id:item.profile_id};});
+  if(thresholds.length!==8)throw Error('Требуется восемь диапазонов.');
+  return {type:'overlap_thresholds',cycle_id:view.cycle_id,thresholds};
+ }
+ function renderOverlap(){
+  const enabled=overlapVariant();$('overlap-threshold-settings').hidden=!enabled;
+  if(!enabled)return;
+  if(!overlapBaseline||(!overlapDirty()&&(overlapSource!==JSON.stringify(overlapConfig())||overlapProfilesSource!==JSON.stringify(profileConfig()))))loadOverlapDraft();
+  $('overlap-threshold-save').disabled=v3Blocked({type:'overlap_thresholds'})||!v3Enabled();
+  $('overlap-threshold-status').textContent='Сохранённый предел: '+(overlapConfig().at(-1)?.upper??'—')+' $. Неисполненные лестницы пересчитываются при изменении прогнозного RECOVERY и настроек; цена входа сохраняется. Объём открытых позиций не меняется.';
+  $('strategy-settings-note').textContent='Начальный триггер следует за свечами. Встречная лестница выставляется на первоначальный SL и остаётся на своём уровне при переносе SL. Профиль неисполненной лестницы пересчитывается по прогнозному RECOVERY с учётом текущих SL и частичных TP. Объём открытых позиций не меняется; последний доступный TP подстраивается под остаток убытка. Пара после SL поддержки работает по OCO: исполнение одного направления отменяет неисполненные ордера другого направления этой пары; открытые позиции не закрываются.';
+  $('candle-recovery-status').textContent=view?.candle_recovery?.wait_reason||(view?.candle_recovery?.manual_required?'Автоматические входы приостановлены. Выберите профиль и объём для ручного продолжения.':'Перекрытие на первоначальном SL · объём '+(view?.candle_recovery?.volume??'—'));
+ }
+ $('overlap-threshold-reload').onclick=()=>{if(overlapDirty()&&!confirm('Отменить несохранённые изменения диапазонов?'))return;loadOverlapDraft();};
+ $('overlap-threshold-save').onclick=async()=>{if(v3Blocked({type:'overlap_thresholds'})||!v3Enabled()||!overlapVariant())return;try{const action=overlapAction(),revision=view.revision,scope=view.scope;if(!confirm('Сохранить выбор профиля по убытку?\n'+action.thresholds.map((x,i)=>(i? action.thresholds[i-1].upper:'0')+'–'+x.upper+' $ → '+profileSummary(profileConfig().profiles.find(p=>p.id===x.profile_id))).join('\n')+'\nВыше '+action.thresholds.at(-1).upper+' $ — ручной режим.\nНеисполненные лестницы будут пересчитаны по новым диапазонам без переноса цены входа. Объём открытых позиций не меняется.'))return;await send(action,revision,scope);if(lastActionReceipt?.status==='APPLIED')loadOverlapDraft();}catch(e){error(e.message);}};
  function v3FillSettings(){
   if(!view)return;
   profileRemoved.clear();$('recovery-profile-removals').textContent='';
@@ -273,7 +337,7 @@
   $('v3-link-status').hidden=!linked;
   $('v3-cancel-entry').hidden=controls.can_cancel_entry!==true;
   $('v3-cancel-entry').disabled=v3Blocked({type:'v3_cancel_entry'})||!enabled||controls.can_cancel_entry!==true;
-  renderProfiles();
+  renderProfiles();renderOverlap();
  }
  // Each drawer owns its state; opening one never opens or closes the other.
  const sidePanelOrder=[],sidePanelDragCancels=[];
@@ -456,7 +520,7 @@
   }
  }
  function render(){
-  renderTotalsHistory();
+  renderMt5TimeControls();renderTotalsHistory();
   connectionLabel();updateBotActivity();
   $('phase').textContent=view.phase;$('cycle').textContent=view.cycle_id??'Ожидание цикла';$('debt').textContent=view.debt+' UST';$('realized').textContent='Учёт с переносом: '+view.realized+' UST';$('feed-status').textContent=view.feed.status;$('mode').textContent=mode==='paper'?'PAPER · без реальных сделок':view.read_only?'READ_ONLY':view.stopped?'Новые входы остановлены':'EXECUTION';
   $('safety').textContent=''; // Safety reasons remain visible in the colored activity area, without duplicate raw labels.
@@ -465,7 +529,8 @@
   if(mode==='paper'){$('paper-command-quote').textContent=paperQuoteText();$('paper-command-quote').dataset.tone=view.paper?.command_quote?.stale?'warning':'info';$('paper-status').textContent=view.paper?.paused_gap?'Перерыв данных или перезапуск. Пропущенные исполнения не восстанавливаются; подтвердите продолжение.':'Моделируются только наблюдаемые свежие тики. Пропущенный путь цены неизвестен.';if(document.activeElement!==$('paper-cost'))$('paper-cost').value=view.paper?.commission_per_lot_side??'0';}
   $('edit-status').textContent=view.edit?'Правка '+view.edit.stage+': показываются фактические данные брокера. При частичном отказе автоматизация остановится.':'';$('journal').textContent=view.journal.join('\n');
   $('request-status').textContent=pending?'Запрос '+pending+': '+(pendingScope===view.scope?view.action_results[pending]?.status??'ожидание':'другой контекст')+'. До сверки новые команды запрещены. При UNKNOWN проверьте журнал и брокера на VPS; перезагрузка не разрешает повтор.':'';
-  for(const id of ['start','stop','resume','reset','cancel-initial','save-settings','reverse-enable','reverse-disable','save-tp-grid','apply-level','paper-resume','paper-flatten','paper-save-cost'])$(id).disabled=!!pending||busy;
+  for(const id of ['start','stop','reset','cancel-initial','save-settings','reverse-enable','reverse-disable','save-tp-grid','apply-level','paper-resume','paper-flatten','paper-save-cost'])$(id).disabled=!!pending||busy;
+  $('paper-resume').hidden=!view.paper?.paused_gap;
   $('paper-flatten').disabled=!view?.cycle_id||!view.positions?.length||v3Blocked({type:'candle_close_all'});
   $('own-entry-sl').disabled=!!pending||busy||view.read_only||!view.positions.length||(!v3Enabled()||view.v3_controls?.can_own_entry_sl!==true)||!!view.edit||!!view.manual_close||!!view.manual_reason||!!view.migration_block||!!view.time_block;
   $('paper-interrupt').disabled=paperInterruptDisabled();
@@ -478,7 +543,7 @@
   $('reverse-enable').title=view.reverse_controls?.reason??'';$('reverse-disable').title=view.reverse_controls?.reason??'';
   if(loadedScope!==view.scope){fields();loadedScope=view.scope;}v3Render();draw();
  }
- async function poll(){if(polling||busy)return;polling=true;pollTask=(async()=>{const started=performance.now();try{const r=await fetch(apiPath('state'),{headers:headers(),signal:AbortSignal.timeout(2500)});if(!r.ok){if([401,403].includes(r.status)){$('login').hidden=false;$('workspace').hidden=true;}throw Error('Нет авторизованного снимка');}const v=await r.json();if(v.contract!=='ticket_basket_v1'||(mode==='paper'?v.mode!=='PAPER':v.mode==='PAPER'))throw Error('Несовместимая версия контроллера');view=v;acceptSnapshotFreshness(v,started);const status=pending&&pendingScope===v.scope?v.action_results[pending]?.status:null;if(['APPLIED','REJECTED','CONFLICT'].includes(status)){lastActionReceipt={status,reason:v.action_results[pending]?.reason,paper_quote:v.action_results[pending]?.paper_quote};clearPending();}$('login').hidden=true;$('workspace').hidden=false;render();}catch(e){v3Fresh=false;paperServerReady=false;if(view){v3Render();connectionLabel();updateBotActivity();$('paper-interrupt').disabled=true;}$('feed-status').textContent='Нет свежего снимка';}finally{polling=false;}})();return pollTask;}
+ async function poll(){if(polling||busy)return;polling=true;pollTask=(async()=>{const started=performance.now();try{const r=await fetch(apiPath('state'),{headers:headers(),signal:AbortSignal.timeout(2500)});if(!r.ok){if([401,403].includes(r.status)){$('login').hidden=false;$('workspace').hidden=true;}throw Error('Нет авторизованного снимка');}const v=await r.json();if(v.contract!=='ticket_basket_v1'||(mode==='paper'?v.mode!=='PAPER':v.mode==='PAPER'))throw Error('Несовместимая версия контроллера');view=v;acceptSnapshotFreshness(v,started);observeMt5DisplayClock();const status=pending&&pendingScope===v.scope?v.action_results[pending]?.status:null;if(['APPLIED','REJECTED','CONFLICT'].includes(status)){lastActionReceipt={status,reason:v.action_results[pending]?.reason,paper_quote:v.action_results[pending]?.paper_quote};clearPending();}$('login').hidden=true;$('workspace').hidden=false;render();}catch(e){v3Fresh=false;mt5DisplayAnchor=null;renderMt5TimeControls();paperServerReady=false;if(view){v3Render();connectionLabel();updateBotActivity();$('paper-interrupt').disabled=true;}$('feed-status').textContent='Нет свежего снимка';}finally{polling=false;}})();return pollTask;}
  const defaultPrefs={mainTrend:false,mainCycle:true,pane:null,pattern:{trend:false,cycle:true},figure:{trend:false,cycle:true},liquidity:false,opacity:20,colors:{BUY:'#26a69a',SELL:'#ef5350',sl:'#ef5350',tp:'#26a69a',entry:'#e0b565',up:'#26a69a',down:'#ef5350',grid:'#25282e',zone:'#e0b565'}};
  let prefs=structuredClone(defaultPrefs);try{const saved=JSON.parse(localStorage.getItem('chart-preferences-v1')??'null');if(saved){for(const k of ['mainTrend','mainCycle','liquidity'])if(typeof saved[k]==='boolean')prefs[k]=saved[k];if(['pattern','figure',null].includes(saved.pane))prefs.pane=saved.pane;for(const pane of ['pattern','figure'])for(const k of ['trend','cycle'])if(typeof saved[pane]?.[k]==='boolean')prefs[pane][k]=saved[pane][k];if(Number.isFinite(saved.opacity))prefs.opacity=Math.max(0,Math.min(100,saved.opacity));for(const k of Object.keys(prefs.colors))if(/^#[0-9a-f]{6}$/i.test(saved.colors?.[k]))prefs.colors[k]=saved.colors[k];}}catch{}
  const savePrefs=()=>{localStorage.setItem('chart-preferences-v1',JSON.stringify(prefs));layout();draw();};
@@ -491,7 +556,7 @@
  $('zone-opacity').oninput=e=>{prefs.opacity=Number(e.target.value);savePrefs();};
  const colorNames={BUY:'BUY STOP',SELL:'SELL STOP',sl:'SL',tp:'TP',entry:'Вход',up:'Растущая свеча',down:'Падающая свеча',grid:'Сетка',zone:'Будущие зоны'};
  for(const [k,v]of Object.entries(prefs.colors)){const label=document.createElement('label');label.textContent=colorNames[k];const input=document.createElement('input');input.type='color';input.id='color-'+k;input.value=v;input.oninput=()=>{prefs.colors[k]=input.value;savePrefs();};label.append(input);$('color-fields').append(label);}
- $('paper-resume').onclick=async()=>{if(mode!=='paper'||!confirm('Продолжить с новых тиков? Пропущенные исполнения не восстанавливаются; текущий разрыв цены может дать исполнение на следующем тике.'))return;try{await send({type:'paper_resume'});}catch(e){error(e.message);}};
+ $('paper-resume').onclick=async()=>{if(mode!=='paper'||!view?.paper?.paused_gap||!confirm('Продолжить после перезапуска с новых наблюдений MT5? Пропущенные исполнения не восстанавливаются; текущий разрыв цены может дать исполнение на следующем тике.'))return;try{await send({type:'paper_resume'});}catch(e){error(e.message);}};
  // Explicit PAPER-only settlement. Capture scope, cycle and obligations before confirmation.
  function paperInterruptDisabled(){return mode!=='paper'||!view||!paperServerReady||!commandQuoteReady({type:'paper_interrupt'})||!!pending||busy||view.read_only||!view.cycle_id||!!view.migration_block||!!view.time_block;}
  $('paper-interrupt').onclick=async()=>{
@@ -547,5 +612,6 @@
  // Reflow the SVG after drawer resizing and device rotation without affecting its data.
  if(typeof ResizeObserver!=='undefined')new ResizeObserver(()=>requestAnimationFrame(draw)).observe($('chart-workspace'));
  layout();window.addEventListener('blur',()=>{cancelSidePanelDrags();cancelGesture();draw();});window.addEventListener('resize',()=>{cancelSidePanelDrags();cancelGesture();requestAnimationFrame(draw);});
+ setInterval(()=>{if(!document.hidden)renderMt5TimeControls();},250);
  setInterval(refreshState,500);refreshState();
 })();

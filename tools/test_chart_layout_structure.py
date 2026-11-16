@@ -16,7 +16,7 @@ class Structure(HTMLParser):
         assert self.stack and self.stack[-1][0]==tag,(tag,self.stack[-3:]);self.stack.pop()
 p=Structure();p.feed((ROOT/'index.html').read_text());assert not p.stack
 inside=lambda key,ancestor:any(id==ancestor for _,id in p.nodes[key][2])
-for id in ('start','stop','resume','reset','logout','save-settings','refresh-settings','save-tp-grid','save-v3-settings','logs-refresh','logs-download','paper-save-cost','writeoff-recovery'):
+for id in ('start','stop','sync-mt5-time','reset','logout','save-settings','refresh-settings','save-tp-grid','save-v3-settings','logs-refresh','logs-download','paper-save-cost','writeoff-recovery'):
     assert inside(id,'settings-page'),id
 for id in ('own-entry-sl','reverse-enable','reverse-disable','cancel-initial','v3-link-toggle','v3-cancel-entry','v3-cancel-request','paper-flatten','level-buttons'):
     assert inside(id,'drawer-content'),id

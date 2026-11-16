@@ -20,7 +20,9 @@ import urllib.request
 import uuid
 import zipfile
 REPO = 'Mihail9990/Simylator'
-CONTRACT = {'format': 1, 'backend': 'paper_mt5_quotes_v1', 'state_schema': 1, 'ledger_contract': 'deal_ledger_v1', 'scope_contract': 'cycle_scope_v1', 'python': '3.13'}
+BRANCH = 'sl-overlap-recovery'
+VARIANT = 'sl_overlap_recovery_v1'
+CONTRACT = {'format': 1, 'backend': 'paper_mt5_quotes_v1', 'state_schema': 1, 'ledger_contract': 'deal_ledger_v1', 'scope_contract': 'cycle_scope_v1', 'python': '3.13', 'variant': VARIANT}
 REQUIREMENTS = ['MetaTrader5==5.0.6231; sys_platform == "win32"', 'requests>=2.31,<3']
 MAX_DOWNLOAD = 32 * 1024 * 1024
 MAX_EXPANDED = 96 * 1024 * 1024
@@ -102,12 +104,12 @@ def download(url, limit=MAX_DOWNLOAD):
                 raise SetupError('Превышен лимит загрузки.')
 
 def latest_sha(fetch=download):
-    data = json.loads(fetch(f'https://api.github.com/repos/{REPO}/git/ref/heads/main', 65536))
-    if not isinstance(data, dict) or data.get('ref') != 'refs/heads/main' or (not isinstance(data.get('object'), dict)) or (data['object'].get('type') != 'commit'):
-        raise SetupError('GitHub не вернул ссылку на ветку main.')
+    data = json.loads(fetch(f'https://api.github.com/repos/{REPO}/git/ref/heads/{BRANCH}', 65536))
+    if not isinstance(data, dict) or data.get('ref') != f'refs/heads/{BRANCH}' or (not isinstance(data.get('object'), dict)) or (data['object'].get('type') != 'commit'):
+        raise SetupError(f'GitHub не вернул ссылку на ветку {BRANCH}.')
     sha = data['object'].get('sha', '')
     if not isinstance(sha, str) or not SHA.fullmatch(sha):
-        raise SetupError('GitHub не вернул корректный SHA ветки main.')
+        raise SetupError(f'GitHub не вернул корректный SHA ветки {BRANCH}.')
     return sha
 
 def extract_archive(blob, destination, sha):
@@ -154,7 +156,7 @@ def extract_archive(blob, destination, sha):
 
 def validate_release(code):
     if not (code / 'managed_release.json').is_file():
-        raise SetupError('Эта версия main ещё не поддерживает установщик. Дождитесь публикации совместимой версии.')
+        raise SetupError('Эта версия ещё не поддерживает установщик SL OVERLAP. Дождитесь публикации совместимой версии.')
     if read_json(code / 'managed_release.json') != CONTRACT:
         raise SetupError('Версия несовместима с этим установщиком. Скачайте новый установщик.')
     lines = [x.strip() for x in (code / 'requirements-tradfi-mt5.txt').read_text().splitlines() if x.strip() and (not x.lstrip().startswith('#'))]
@@ -428,7 +430,7 @@ class Manager:
             self.inspect_states()
             self.backup()
             sha = latest_sha(self.fetch)
-            self.report(f'{REPO}\nmain → {sha}')
+            self.report(f'{REPO}\n{BRANCH} → {sha}')
             if sha == old['current']:
                 self.current_release()
                 self.report('Уже установлена актуальная версия.')

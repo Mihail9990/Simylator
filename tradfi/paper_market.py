@@ -122,7 +122,6 @@ class RawMarketReader(MarketReader):
         closed,current=closed_pair(tick,bars[-2:])
         stamp=self.raw_time.observe(tick)
         self.display_clock.connection(True)
-        if self.display_clock.anchor is None:self.display_clock.align(tick)
         spec=dict(symbol=self.symbol,currency='UST',profit_currency=str(info.currency_profit),calc_mode=str(info.trade_calc_mode),
             contract_size=str(info.trade_contract_size),tick_size=str(info.trade_tick_size),tick_value_profit=str(info.trade_tick_value_profit),tick_value_loss=str(info.trade_tick_value_loss),
             volume_min=str(info.volume_min),volume_step=str(info.volume_step),volume_max=str(info.volume_max),point=str(info.point),stops_level=str(info.trade_stops_level),freeze_level=str(info.trade_freeze_level))
@@ -149,8 +148,23 @@ class RawMarketReader(MarketReader):
             raise
 
     def align_time(self):
-        self.read_raw()
-        return self.display_clock.align(self._tick(self.symbol))
+        # Display synchronization needs a valid identity and tick, not fresh
+        # candles, UTC, the Windows wall clock or any execution permission.
+        try:
+            account=self._account_info()
+            if account is None:raise OSError('MT5_SOURCE_UNAVAILABLE')
+            identity=str(account.login)+'@'+account.server
+            if account.currency!='UST' or account.server!='Bybit-Live-6':raise ValueError('Unsupported source currency/server')
+            if self._expected_account is None:self._expected_account=identity
+            if identity!=self._expected_account:raise OSError('MT5_SOURCE_IDENTITY_CHANGED')
+            tick=self._tick(self.symbol)
+            if tick is None:raise OSError('MT5_RAW_WAIT_DATA')
+            bid,ask=number(tick.bid),number(tick.ask)
+            if bid<=0 or ask<bid:raise ValueError('Invalid quote')
+            return self.display_clock.align(tick)
+        except Exception:
+            self.display_clock.connection(False)
+            raise
 
     def view(self):
         result=deepcopy(self.last or dict(source='MT5_READ_ONLY',symbol=self.symbol,quote={},candles=[],timestamp=None))

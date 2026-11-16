@@ -16,8 +16,8 @@ import uuid
 
 import install_tradfi as legacy
 
-CONTRACT = {'format': 1, 'roles': ['paper'], 'layout': 'independent_roots_v1'}
-ROOT_NAMES = {'paper': 'AI_IMPULS_PAPER'}
+CONTRACT = {'format': 1, 'roles': ['paper'], 'layout': 'sl_overlap_roots_v1'}
+ROOT_NAMES = {'paper': 'AI_IMPULS_PAPER_SL_OVERLAP'}
 
 
 def default_root(role):
@@ -96,7 +96,7 @@ class IndependentManager(legacy.Manager):
             raise legacy.SetupError('Привязка незавершённого переноса потеряна; файлы не изменяются.')
         marker=self.root/'managed-install.json'
         if marker.exists():
-            if legacy.read_json(marker)!=dict(format=2,role=self.role,layout='independent_roots_v1') or not role_path.exists():
+            if legacy.read_json(marker)!=dict(format=2,role=self.role,layout='sl_overlap_roots_v1') or not role_path.exists():
                 raise legacy.SetupError('Установка архивная, общая или повреждённая. Используйте явный перенос, не пересоздавайте привязку.')
     @property
     def config_path(self):return self.path_for()
@@ -135,7 +135,7 @@ class IndependentManager(legacy.Manager):
         if not marker.exists():
             if (self.root/'data').exists() and any((self.root/'data').iterdir()):raise legacy.SetupError('Неизвестные данные: используйте явный перенос.')
             legacy.atomic_json(self.root/'application.json',{'format':1,'role':self.role})
-            legacy.atomic_json(marker,dict(format=2,role=self.role,layout='independent_roots_v1'))
+            legacy.atomic_json(marker,dict(format=2,role=self.role,layout='sl_overlap_roots_v1'))
         if not self.config_path.exists():
             if self.pointer()['current']:raise legacy.SetupError('Конфигурация потеряна; не создаём замену.')
             name='tradfi_paper_config.example.json'
@@ -211,7 +211,7 @@ def gui(role="paper",root=None):
     from tkinter import messagebox,ttk
     root=Path(root).resolve() if root is not None else default_root(role);manager=IndependentManager(root,role)
     legacy_root=Path(os.environ['LOCALAPPDATA'])/'AI_IMPULS_TRADFI_Manager'
-    app=tk.Tk();app.title('AI IMPULS · '+role.upper());app.geometry('840x540')
+    app=tk.Tk();app.title('AI IMPULS · SL OVERLAP · '+role.upper());app.geometry('840x540')
     if os.name!='nt' or sys.version_info[:2]!=(3,13) or sys.maxsize<=2**32:
         messagebox.showerror('Среда','Нужен Windows и Python 3.13 x64.');app.destroy();return
     events=queue.Queue();child=None;session=None;busy=False;buttons=[]

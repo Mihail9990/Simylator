@@ -149,7 +149,7 @@ class Setup:
         for path in (self.root, *self.root.parents, self.root / 'data', self.config, self.home):
             if path.is_symlink() or getattr(path, 'is_junction', lambda: False)():
                 raise shared.GuardError('ROOT_LINK_REJECTED')
-        if shared.read(self.root / 'application.json') != {'format': 1, 'role': 'paper'} or shared.read(self.root / 'managed-install.json') != {'format': 2, 'role': 'paper', 'layout': 'independent_roots_v1'} or (self.root / 'migration-pending.json').exists():
+        if shared.read(self.root / 'application.json') != {'format': 1, 'role': 'paper'} or shared.read(self.root / 'managed-install.json') != {'format': 2, 'role': 'paper', 'layout': 'sl_overlap_roots_v1'} or (self.root / 'migration-pending.json').exists():
             raise shared.GuardError('ROOT_INVALID')
         cfg = shared.read(self.config)
         web = cfg.get('web', {})

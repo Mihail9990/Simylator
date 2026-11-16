@@ -34,7 +34,7 @@ class PaperUpdateTests(unittest.TestCase):
         def fetch(url, limit=installer.MAX_DOWNLOAD):
             self.fetches.append(url)
             if '/git/ref/' in url:
-                return json.dumps(dict(ref='refs/heads/main', object=dict(type='commit', sha=self.current))).encode()
+                return json.dumps(dict(ref='refs/heads/sl-overlap-recovery', object=dict(type='commit', sha=self.current))).encode()
             return self.archives[self.current]
         self.manager = app.IndependentManager(self.root, 'paper', fetch=fetch, report=lambda _: None)
         self.manager.prepare_python = lambda _: None

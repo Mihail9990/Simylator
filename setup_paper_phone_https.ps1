@@ -1,5 +1,5 @@
 param(
-    [string]$Root = (Join-Path $env:LOCALAPPDATA 'AI_IMPULS_PAPER'),
+    [string]$Root = (Join-Path $env:LOCALAPPDATA 'AI_IMPULS_PAPER_SL_OVERLAP'),
     [string]$ExpectedSid = ''
 )
 # No firewall or service actions here. The GUI confirms each mutation separately.

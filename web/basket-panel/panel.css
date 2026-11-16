@@ -180,3 +180,5 @@ body{background:var(--bg)}main{padding:0;max-width:none}#login{max-width:480px;m
 #v3-panels #v3-entry-panel .fields{grid-template-columns:minmax(0,1fr);gap:6px}
 #v3-panels #v3-entry-panel .entry-actions button,#v3-panels #v3-sl-confirm{white-space:normal;overflow-wrap:anywhere;font-size:12px}
 #bot-activity #bot-activity-state,#bot-activity p[data-tone=info]{color:#83c3ff;font-weight:700}
+
+.overlap-threshold-row{display:grid;grid-template-columns:minmax(100px,1fr) minmax(0,2fr);gap:8px;margin:10px 0}.overlap-threshold-row input,.overlap-threshold-row select{width:100%;min-width:0;box-sizing:border-box}

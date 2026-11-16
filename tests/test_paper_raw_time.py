@@ -62,12 +62,46 @@ class PaperRawTimeTests(unittest.TestCase):
 
     def test_display_alignment_monotonic_not_wall(self):
         api=UTCAPI();reader=self.make_reader(api,lambda:-999)
-        reader.read();anchor=reader.view()['display_clock']['broker_time']
+        reader.read();self.assertEqual(reader.view()['display_clock']['status'],'UNALIGNED')
+        reader.align_time();anchor=reader.view()['display_clock']['broker_time']
         api.now+=12
         self.assertEqual(reader.view()['display_clock']['estimated_broker_time'],anchor+12)
         api.unavailable=True
         with self.assertRaises(OSError):reader.read()
         self.assertEqual(reader.view()['display_clock']['status'],'DISCONNECTED')
+    def test_explicit_sync_does_not_change_trading_state_and_reconnect_requires_sync(self):
+        from copy import deepcopy
+        api=UTCAPI();reader=self.make_reader(api)
+        with tempfile.TemporaryDirectory() as tmp:
+            session=PaperSession(Path(tmp)/'paper.db',reader,clock=lambda:api.now,monotonic=lambda:api.now)
+            try:
+                session.step()
+                before=deepcopy(session.exchange.p)
+                phase=session.controller.state['phase']
+                session.action(dict(type='command',text='/sync_mt5_time'))
+                self.assertEqual(session.view()['time_status']['display_clock']['status'],'ALIGNED')
+                self.assertEqual(session.view()['time_status']['market_time_mode'],'mt5_raw_v1')
+                self.assertEqual(session.exchange.p,before)
+                self.assertEqual(session.controller.state['phase'],phase)
+                api.unavailable=True
+                session.step()
+                self.assertEqual(session.view()['time_status']['display_clock']['status'],'DISCONNECTED')
+                api.unavailable=False
+                session.step()
+                self.assertEqual(session.view()['time_status']['display_clock']['status'],'UNALIGNED')
+                self.assertTrue(quote_info(session.exchange)['available'])
+            finally:session.close()
+
+    def test_display_sync_needs_only_identity_tick_and_monotonic_clock(self):
+        api=UTCAPI();reader=self.make_reader(api,lambda:self.fail('No Windows clock'))
+        reader._bars=lambda *args:self.fail('Display sync must not require candles')
+        reader.safety.check=lambda:self.fail('No UTC/freshness gate')
+        reader.align_time()
+        self.assertEqual(reader.display_clock.view()['status'],'ALIGNED')
+        reader._expected_account='different@Bybit-Live-6'
+        with self.assertRaises(OSError):reader.align_time()
+        self.assertEqual(reader.display_clock.view()['status'],'DISCONNECTED')
+
     def test_invalid_tick_or_offset_rejected(self):
         api=UTCAPI()
         with self.assertRaises(ValueError):RawMarketReader(api,symbol='XAUUSD.s',clock=lambda:api.now,monotonic=lambda:api.now,market_time_offset_seconds=7200)

@@ -13,7 +13,9 @@ jobs:
           node-version: '22'
       - run: python -m pip install -r requirements.txt -r requirements-dev.txt
       - run: python tools/run_offline_tests.py
+      - run: node tools/test_mt5_time_controls_unit.js
       - run: node tools/test_v3_panel_unit.js
+      - run: node tools/test_overlap_thresholds_unit.js
       - run: node tools/test_chart_height_unit.js
       - run: node tools/test_bot_activity_unit.js
       - run: node tools/test_history_totals_unit.js

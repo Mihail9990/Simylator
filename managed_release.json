@@ -4,5 +4,6 @@
   "state_schema": 1,
   "ledger_contract": "deal_ledger_v1",
   "scope_contract": "cycle_scope_v1",
-  "python": "3.13"
+  "python": "3.13",
+  "variant": "sl_overlap_recovery_v1"
 }
