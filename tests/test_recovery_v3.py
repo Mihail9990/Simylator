@@ -226,9 +226,9 @@ class V3Paper(unittest.TestCase):
         self.assertFalse(c.get('manual'));self.assertFalse(f.p['orders'])
         f.reader.tick('4002','4002.1');f.step(5)
         self.assertFalse(f.p['positions']);self.assertFalse(f.p['orders']);self.assertEqual(f.session.controller.state['phase'],'V3_WAIT_ENTRY')
-    def test_market_idempotency_and_gap_block(self):
+    def test_market_idempotency_without_gap_block(self):
         f=self.f;e=f.session.exchange
         cmd=dict(id='m1',kind='MARKET',side='BUY',size='.01',price='4000.10',sl='3998',tp='4001')
         e.submit(cmd);e.submit(cmd);self.assertEqual(len(f.p['positions']),1)
-        e.p['paused_gap']=True;e.submit(dict(cmd,id='m2'));self.assertEqual(e.result('m2')['status'],'REJECTED');self.assertEqual(len(f.p['positions']),1)
+        e.p['paused_gap']=True;e.submit(dict(cmd,id='m2'));self.assertEqual(e.result('m2')['status'],'ACCEPTED');self.assertEqual(len(f.p['positions']),2)
 

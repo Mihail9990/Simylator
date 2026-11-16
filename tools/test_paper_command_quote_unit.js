@@ -4,7 +4,7 @@ const src=fs.readFileSync(path.join(__dirname,'../web/basket-panel/panel.js'),'u
 const nodes={},$=id=>nodes[id]??={dataset:{},textContent:'',hidden:false,disabled:false};
 let now=1000,calls=0,release=null;
 const fresh=()=>({contract:'ticket_basket_v1',mode:'PAPER',paper:{command_quote:{available:true,bid:'100',ask:'101',timestamp:1804800000,age_seconds:0,stale:false,source:'LAST_VERIFIED_MT5'}},scope:'paper',revision:4,command_context_token:'a'.repeat(64),phase:'V3_WAIT_ENTRY',snapshot_freshness:{fresh:true,age_seconds:0,max_age_seconds:2},feed:{status:'FRESH',timestamp_semantics:'VERIFIED',age_seconds:0},action_results:{}});
-const ctx=vm.createContext({$,performance:{now:()=>now},view:null,mode:'paper',busy:false,polling:false,pending:null,pendingScope:null,lastActionReceipt:null,preview:null,headers:()=>({}),apiPath:k=>'/api/paper/'+k,AbortSignal:{timeout:()=>null},render:()=>{},v3Render:()=>{},connectionLabel:()=>{},updateBotActivity:()=>{},feedUtcVerified:()=>ctx.view?.feed?.timestamp_semantics==='VERIFIED',clearPending:()=>{ctx.pending=null;ctx.pendingScope=null;},notice:()=>{},localStorage:{setItem:()=>{}},storageKey:x=>x,crypto:{randomUUID:()=> 'fixture-request'},fetch:async()=>{calls++;return new Promise(resolve=>{release=resolve;});}});
+const ctx=vm.createContext({$,performance:{now:()=>now},view:null,mode:'paper',busy:false,polling:false,pending:null,pendingScope:null,lastActionReceipt:null,preview:null,headers:()=>({}),apiPath:k=>'/api/paper/'+k,AbortSignal:{timeout:()=>null},render:()=>{},v3Render:()=>{},connectionLabel:()=>{},updateBotActivity:()=>{},paperInterruptDisabled:()=>false,feedUtcVerified:()=>ctx.view?.feed?.timestamp_semantics==='VERIFIED',clearPending:()=>{ctx.pending=null;ctx.pendingScope=null;},notice:()=>{},localStorage:{setItem:()=>{}},storageKey:x=>x,crypto:{randomUUID:()=> 'fixture-request'},fetch:async()=>{calls++;return new Promise(resolve=>{release=resolve;});}});
 vm.runInContext(src.slice(src.indexOf(' let v3Fresh=false'),src.indexOf(' const v3Enabled=')),ctx);
 vm.runInContext('let mt5DisplayAnchor=null;function observeMt5DisplayClock(){}function renderMt5TimeControls(){}',ctx);
 vm.runInContext(src.slice(src.indexOf(' async function poll(){'),src.indexOf(' const defaultPrefs=')),ctx);
@@ -28,12 +28,12 @@ const accept=(v,start=now)=>{ctx.view=v;ctx.sample=v;ctx.started=start;run('acce
  for(const change of [{available:false},{source:'FAKE'},{bid:null},{bid:''},{bid:'NaN'},{ask:'99'},{timestamp:1e30},{age_seconds:-3},{age_seconds:null}]){const v=stale();Object.assign(v.paper.command_quote,change);accept(v);assert.equal(run('paperQuoteAvailable()'),false);}
  let missing=stale();missing.paper.command_quote={available:false};accept(missing);
  ctx.fetch=async url=>{if(url.endsWith('action')){posts++;return{ok:true,json:async()=>({status:'APPLIED'})};}return{ok:true,json:async()=>missing};};
- const before=posts;await assert.rejects(run("send({type:'v3_entry'})"),/Нет последней проверенной/);assert.equal(posts,before);
+ const before=posts;await run("send({type:'v3_entry'})");assert.equal(posts,before+1,"server decides whether a price is available");
  for(const type of ['cancel_initial','v3_cancel_entry','v3_cancel_link','v3_cancel_request','paper_costs']){accept(missing);await run('send({type:'+JSON.stringify(type)+'})');}
- assert.equal(posts,before+5);
+ assert.equal(posts,before+6);
  // Missing/stale server publication still forbids a priced action or cancellation.
  missing.snapshot_freshness.fresh=false;accept(missing);
- await assert.rejects(run("send({type:'v3_cancel_entry'})"),/Нет свежего снимка/);assert.equal(posts,before+5);
+ await run("send({type:'v3_cancel_entry'})");assert.equal(posts,before+7);
  // LIVE retains fresh quote guard despite PAPER metadata.
  ctx.mode='live';accept(stale());ctx.fetch=async()=>({ok:true,json:async()=>({...stale(),mode:'LIVE'})});
  await assert.rejects(run("send({type:'v3_entry'})"),/Нет свежей подтверждённой/);ctx.mode='paper';

@@ -94,11 +94,12 @@ class PaperTest(unittest.TestCase):
         self.start();self.reader.tick('4002','4002.1',seconds=-1);self.step();self.assertFalse(self.p['positions'])
         self.reader.now+=100;self.step();self.assertFalse(self.p['positions'])
         self.reader.reason='DISCONNECTED';self.step();self.assertFalse(self.p['positions'])
-    def test_restart_baseline_no_historical_replay_and_explicit_resume(self):
+    def test_restart_processes_current_observed_quote_without_pause_or_replay(self):
         self.start();self.session.close();self.reader.tick('4001','4001.1',seconds=60);self.create();self.step(3)
-        self.assertTrue(self.p['paused_gap']);self.assertFalse(self.p['positions'])
-        self.action(dict(type='paper_resume'));self.step();self.assertFalse(self.p['positions'])
-        self.reader.tick('4001','4001.1');self.step(3);self.assertEqual(len(self.p['positions']),1)
+        self.assertFalse(self.p['paused_gap']);self.assertEqual(len(self.p['positions']),1)
+        self.assertEqual(self.p['positions'][0]['entry'],'4001.1')
+        count=len(self.p['deals']);self.step(5)
+        self.assertEqual(len(self.p['deals']),count)
     def test_costs_model_and_flatten_reset_retain_debt(self):
         self.action(dict(type='paper_costs',commission_per_lot_side='2'));self.reversal()
         self.assertEqual(D(self.session.controller.state['cycle']['recovery']),D('3.16'))
@@ -117,11 +118,11 @@ class PaperTest(unittest.TestCase):
         gate=self.session.gateway;r=dict(id='same-id-001',revision=0,action=dict(type='command',text='/stop'))
         self.assertEqual(gate.apply(r)['status'],'APPLIED');self.assertEqual(gate.apply(r)['status'],'APPLIED')
         with self.assertRaises(Conflict):gate.apply(dict(r,id='stale-id-002'))
-    def test_gap_resume_cannot_bypass_24h_limit(self):
+    def test_paper_has_no_24h_cycle_deadline(self):
         self.start();self.reader.tick('4000','4000.1',seconds=90000);self.step()
-        self.assertTrue(self.p['paused_gap'])
-        with self.assertRaises(ActionRejected):self.action(dict(type='paper_resume'))
-        self.assertEqual(self.session.controller.state['cycle']['manual_reason'],'CYCLE_24H_LIMIT')
+        self.assertFalse(self.p['paused_gap'])
+        self.action(dict(type='paper_resume'))
+        self.assertFalse(self.session.controller.state['cycle'].get('manual'))
         self.assertFalse(self.p['positions'])
     def test_stale_start_uses_last_verified_quote_without_automatic_entry(self):
         self.reader.reason='CLOSED_MARKET';self.step()
@@ -139,7 +140,7 @@ class PaperTest(unittest.TestCase):
     def test_restart_after_fill_before_controller_adoption_books_once(self):
         self.start();self.reader.tick('4000.9','4001');self.session.exchange.observe(self.reader.read())
         self.assertEqual(len(self.p['positions']),1);self.session.close();self.create();self.step()
-        self.assertTrue(self.p['paused_gap']);self.action(dict(type='paper_resume'));self.step(4)
+        self.assertFalse(self.p['paused_gap']);self.action(dict(type='paper_resume'));self.step(4)
         self.assertEqual(len(self.p['positions']),1);self.assertEqual(len(self.p['orders']),0)
         self.assertEqual(len([d for d in self.p['deals'] if d['entry']=='IN']),1)
     def test_new_oco_both_sides_crossed_in_one_observed_tick_halts(self):

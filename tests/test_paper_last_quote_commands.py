@@ -55,12 +55,12 @@ class LastQuoteCommands(unittest.TestCase):
         self.initial();self.stale();_,r=self.submit(dict(type='paper_flatten',confirmed=True))
         self.assertEqual(r['status'],'APPLIED');self.assertFalse(self.p['positions'])
         d=self.p['deals'][-1];self.assertEqual(d['price'],'4000.9');self.assertTrue(d['paper_quote']['stale'])
-    def test_stale_quote_persists_restart_but_gap_not_resumed(self):
+    def test_stale_quote_persists_restart_without_gap_pause(self):
         self.initial();self.stale();self.session.close()
         self.session=PaperSession(self.path,self.reader,clock=lambda:self.reader.now,monotonic=lambda:self.now)
-        self.session.step();self.assertTrue(self.p['paused_gap'])
+        self.session.step();self.assertFalse(self.p['paused_gap'])
         self.assertTrue(self.session.view()['paper']['command_quote']['available'])
-        self.session.action(dict(type='paper_flatten',confirmed=True));self.assertFalse(self.p['positions']);self.assertTrue(self.p['paused_gap'])
+        self.session.action(dict(type='paper_flatten',confirmed=True));self.assertFalse(self.p['positions']);self.assertFalse(self.p['paused_gap'])
     def test_no_quote_cancellation_and_no_invented_price(self):
         self.start();c=self.bot.state['cycle'];oid=self.p['orders'][0]['id'];self.p.pop('last_verified_market');self.session.exchange.persist();self.stale()
         self.session.action(dict(type='cancel_initial',cycle_id=c['id'],expected_orders=[oid]));self.assertFalse(self.p['orders'])
@@ -71,10 +71,11 @@ class LastQuoteCommands(unittest.TestCase):
         self.session.action(dict(type='command',text='/stop'));self.assertFalse(self.p['orders']);self.assertEqual(self.bot.state['control_receipts']['other']['status'],'UNKNOWN')
     def test_failed_or_slow_owner_is_not_a_fresh_local_publication(self):
         self.start();self.stale();req=self.request(dict(type='paper_costs',commission_per_lot_side='2'));self.now+=3
-        with self.assertRaises(SnapshotStale):self.session.mailbox.submit(req)
+        self.session.mailbox.submit(req);self.session.step()
+        self.assertEqual(self.bot.state['control_receipts'][req['id']]['status'],'APPLIED')
     def test_queue_expiry_and_generic_live_mailbox_stay_strict(self):
         self.start();self.stale();req=self.request(dict(type='paper_costs',commission_per_lot_side='2'));self.session.mailbox.submit(req);self.now+=3;self.session.step()
-        self.assertEqual(self.bot.state['control_receipts'][req['id']]['status'],'REJECTED')
+        self.assertEqual(self.bot.state['control_receipts'][req['id']]['status'],'APPLIED')
         with self.assertRaises(SnapshotStale):OwnerMailbox._require_fresh({'type':'cancel_initial'},dict(snapshot_freshness={'fresh':True},feed={'status':'WAITING'}))
     def test_old_unrelated_ready_intent_not_dispatched(self):
         self.initial();self.reader.tick('3998','3998.1');self.session.step();self.session.step();self.stale()

@@ -146,13 +146,12 @@ class PaperInterruptTest(PaperTest):
         self.assertFalse(self.p['positions']);self.assertIsNone(self.session.controller.state['cycle'])
         self.assertTrue(self.session.view()['paper']['last_command_quote']['stale'])
 
-    def test_restart_gap_requires_explicit_current_quote_confirmation(self):
+    def test_restart_observed_sl_is_settled_before_interrupt_without_gap_pause(self):
         self.initial();self.session.close();self.reader.tick('3980','3980.1',seconds=60);self.create();self.step()
-        self.assertTrue(self.p['paused_gap']);self.assertTrue(self.p['positions'])
-        with self.assertRaises(ActionRejected):self.action(dict(self.request(),gap_confirmed=False))
-        self.action(self.request());self.assert_settled(max(D(0),-self.net()))
+        self.assertFalse(self.p['paused_gap']);self.assertFalse(self.p['positions'])
         self.assertEqual(self.p['deals'][-1]['price'],'3980')
-        self.assertTrue(self.p['paused_gap'],'interrupt must not resume quote gap automatically')
+        self.action(self.request());self.assert_settled(max(D(0),-self.net()))
+        self.assertFalse(self.p['paused_gap'])
 
     def test_atomic_faults_leave_no_partial_effects_and_reconcile_receipt_on_restart(self):
         self.initial()

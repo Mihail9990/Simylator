@@ -4,13 +4,13 @@ const fs=require('fs'),path=require('path'),vm=require('vm'),assert=require('ass
 const root=path.join(__dirname,'../web/basket-panel'),source=fs.readFileSync(path.join(root,'panel.js'),'utf8'),html=fs.readFileSync(path.join(root,'index.html'),'utf8');
 const ids=[...html.matchAll(/id="([^"]+)"/g)].map(m=>m[1]);assert.equal(new Set(ids).size,ids.length);
 for(const id of ['sync-mt5-time','mt5-display-clock','mt5-clock-status','mt5-time-mode'])assert(ids.includes(id));
-assert(html.includes('Сверить часы MT5…'));assert(!ids.includes('use-mt5-raw-time'));assert(!ids.includes('resume'));assert(ids.includes('paper-resume'));assert(/id="paper-resume" hidden/.test(html));assert(source.includes("$('paper-resume').hidden=!view.paper?.paused_gap"));
+assert(html.includes('Сверить часы MT5…'));assert(!ids.includes('use-mt5-raw-time'));assert(!ids.includes('resume'));assert(ids.includes('paper-resume'));assert(/id="paper-resume" hidden/.test(html));assert(source.includes("$('paper-resume').hidden=true"));
 const nodes={},$=id=>nodes[id]??={textContent:'',disabled:false},actions=[],dialogs=[],errors=[];let mono=1000,accept=true,onConfirm=null;
 const base=()=>({scope:'live-fixture',revision:42,read_only:true,positions:[{id:'existing'}],orders:[],time_status:{market_time_mode:'fixed_offset_v1',can_switch_raw:false,switch_reason:'Открытые позиции блокируют переключение.',display_clock:{status:'UNALIGNED',broker_time:null,estimated_broker_time:null,elapsed_seconds:null,timestamp_semantics:'BROKER_RAW',verified_utc:false,source_connected:true}}});
 const context=vm.createContext({$,view:base(),v3Fresh:true,busy:false,pending:null,performance:{now:()=>mono},Date:class extends Date{static now(){throw Error('Wall clock must not be read');}},confirm:message=>{dialogs.push(message);onConfirm?.();return accept;},send:async(action,revision,scope)=>actions.push({action,revision,scope}),error:message=>errors.push(message)});
 vm.runInContext(source.slice(source.indexOf(' // MT5 clock controls are separate'),source.indexOf(' // Activity uses controller snapshots')),context);
 const run=code=>vm.runInContext(code,context),render=()=>run('renderMt5TimeControls()'),observe=()=>run('observeMt5DisplayClock();renderMt5TimeControls()');
-vm.runInContext(source.slice(source.indexOf(" $('paper-resume').onclick="),source.indexOf(' // Explicit PAPER-only settlement.')),context);
+
 context.mode='paper';
 (async()=>{
  observe();assert.equal(actions.length,0,'initial rendering never synchronizes or migrates automatically');assert.equal($('sync-mt5-time').disabled,false,'READ_ONLY and open positions do not block display sync');
@@ -34,10 +34,7 @@ context.mode='paper';
  context.view.scope='different';render();assert($('mt5-display-clock').textContent.endsWith('—'),'old clock does not cross controller scope');
  assert(source.includes("$('reset').onclick=()=>command('/reset_manual'"),'manual reconciliation remains a distinct original control');
  assert(!source.slice(source.indexOf(' // MT5 clock controls are separate'),source.indexOf(' // Activity uses controller snapshots')).includes('Date.now'));
- // Restart continuation remains separate and available only for a persisted pause.
- context.view=base();context.view.paper={paused_gap:false};let resumeBefore=actions.length;
- await $('paper-resume').onclick();assert.equal(actions.length,resumeBefore);
- context.view.paper.paused_gap=true;accept=false;await $('paper-resume').onclick();assert.equal(actions.length,resumeBefore);
- accept=true;await $('paper-resume').onclick();assert.equal(actions.length,resumeBefore+1);assert.equal(actions.at(-1).action.type,'paper_resume');
+ // No reconnect pause or continuation handler in PAPER.
+ assert(!source.includes("$('paper-resume').onclick="));
  console.log('PASS PAPER MT5 display clock controls: explicit confirmations, cancel/race/UNKNOWN/HTTP guards, READ_ONLY/open-position sync, monotonic display-only progression, restart/reconnect invalidation and zero real trades');
 })().catch(e=>{console.error(e);process.exitCode=1;});

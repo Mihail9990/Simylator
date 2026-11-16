@@ -23,11 +23,13 @@
 
  function clearPending(){pending=null;pendingScope=null;localStorage.removeItem(storageKey('request'));localStorage.removeItem(storageKey('scope'));}
  async function send(action,revision=view?.revision,scope=view?.scope){
+  // PAPER sends against the last known scope/context. Poll delay never blocks a POST.
+  // The owner thread validates current objects and returns a scoped receipt.
   const contextToken=view?.command_context_token;
   const safeRecovery=action.type==='command'&&['/stop','/resume_time','/sync_mt5_time'].includes(action.text);
   if(busy||pending)throw Error('Предыдущий исход не сверён. Повтор запрещён.');
   if(!view||scope!==view.scope)throw Error('Контекст изменился; обновите данные.');
-  if(!safeRecovery&&(!snapshotCurrent()||!commandQuoteReady(action))){
+  if(mode!=='paper'&&!safeRecovery&&(!snapshotCurrent()||!commandQuoteReady(action))){
    // Confirmation dialogs can outlive the client snapshot. Refresh only reads,
    // keeping the exact reviewed revision/context; never retry a trade POST.
    const context=commandContext(view);
@@ -35,8 +37,8 @@
    await poll();
    if(commandContext(view)!==context)throw Error('Состояние или параметры изменились. Проверьте данные и подтвердите команду заново.');
   }
-  if(!snapshotCurrent()&&!safeRecovery&&!(mode==='paper'&&paperServerReady))throw Error('Нет свежего снимка. Команда не отправлена.');
-  if(!commandQuoteReady(action)&&!safeRecovery)throw Error(mode==='paper'?'Нет последней проверенной котировки MT5. Команда не отправлена.':'Нет свежей подтверждённой котировки. Команда не отправлена.');
+  if(mode!=='paper'&&!snapshotCurrent()&&!safeRecovery)throw Error('Нет свежего снимка. Команда не отправлена.');
+  if(mode!=='paper'&&!commandQuoteReady(action)&&!safeRecovery)throw Error(mode==='paper'?'Нет последней проверенной котировки MT5. Команда не отправлена.':'Нет свежей подтверждённой котировки. Команда не отправлена.');
   if(busy||pending)throw Error('Предыдущий исход не сверён. Повтор запрещён.');
   if(!view||scope!==view.scope)throw Error('Контекст изменился; обновите данные.');
   const request={id:crypto.randomUUID(),revision,action,...(!safeRecovery&&typeof contextToken==='string'?{context_token:contextToken}:{})};pending=request.id;pendingScope=scope;localStorage.setItem(storageKey('request'),pending);localStorage.setItem(storageKey('scope'),scope);busy=true;lastActionReceipt=null;notice('action-error','');updateBotActivity();
@@ -60,7 +62,7 @@
    if(busy||pending)throw Error('Предыдущий исход не сверён. Повтор запрещён.');
    const revision=view.revision,scope=view.scope,context=commandContext(view);
    if(!confirm(message))return;
-   if(!['/stop','/resume_time','/sync_mt5_time'].includes(text)){
+   if(mode!=='paper'&&!['/stop','/resume_time','/sync_mt5_time'].includes(text)){
     // A modal pauses polling. Await any old request, then require a new GET.
     if(polling)await pollTask;
     await poll();
@@ -127,18 +129,18 @@
   const write=(id,text)=>{if($(id).textContent!==text)$(id).textContent=text;};
   if(!view){write('bot-activity-state','Ожидание снимка контроллера.');return;}
   const phases={WAIT_START:'Ожидание запуска',WAIT_CANDLE:'Ожидаю закрытие свечи',INITIAL_WAIT:'Ожидаю закрытие свечи',INITIAL_PENDING:'Ожидаю сверку состояния ордеров',INITIAL_POSITION:'Ожидаю сверку состояния позиции',RECOVERY_POSITION:'Ожидаю сверку состояния позиций',RECOVERY_PENDING:'Ожидание ордеров RECOVERY / сверки',RECOVERY_CLEANUP:'Очистка ордеров RECOVERY / сверка',V3_WAIT_ENTRY:'Ожидаю ручной ордер',V3_WAIT_CANDLE:'Ожидаю закрытие свечи',COOLDOWN:'Пауза перед новым циклом',PAUSED:'Новые входы остановлены',PAUSED_CYCLE:'Цикл приостановлен',MANUAL:'Требуется ручная сверка',SAFE_PAUSE:'Защитная пауза',MIGRATION_BLOCK:'Блокировка переноса состояния'};
-  const dataAvailable=quoteCurrent();
-  // Generic data gaps are shown only as a neutral state; guards remain immediate.
+  const dataAvailable=mode==='paper'||quoteCurrent();
+  // PAPER activity is independent of snapshot/quote age.
   const warnings=[];
   if(view.read_only)warnings.push('Только просмотр: торговые команды отключены');
   if(view.migration_block)warnings.push(friendlyReason(view.migration_block));if(view.manual_reason)warnings.push(friendlyReason(view.manual_reason));
-  if(view.time_block)warnings.push(timeSafetyText());
+  if(mode!=='paper'&&view.time_block)warnings.push(timeSafetyText());
   write('bot-activity-warning',warnings.join(' · '));$('bot-activity-warning').dataset.tone='warning';$('bot-activity-state').dataset.tone='info';
   let detail=phases[view.phase]??('Состояние контроллера: '+(view.phase??'не указано'));
-  const safetyBlocked=!dataAvailable||view.manual_reason||view.migration_block||view.time_block||['MANUAL','SAFE_PAUSE','MIGRATION_BLOCK'].includes(view.phase);
+  const safetyBlocked=!dataAvailable||view.manual_reason||view.migration_block||(mode!=='paper'&&view.time_block)||['MANUAL','SAFE_PAUSE','MIGRATION_BLOCK'].includes(view.phase);
   if(!safetyBlocked){if(view.positions?.length)detail='Ожидаю исполнения TP или SL';else if(view.orders?.length)detail='Ожидаю исполнения триггер ордера';}
-  else if(view.manual_reason||view.migration_block||view.time_block||(!feedUtcVerified()&&view?.feed?.timestamp_semantics!=='BROKER_RAW')||['MANUAL','SAFE_PAUSE','MIGRATION_BLOCK'].includes(view.phase))detail='Действия приостановлены: требуется проверка';
-  else detail=mode==='paper'&&paperServerReady?'Ожидание обновления; команды проверяет сервер':'Команды недоступны: ожидание данных';
+  else if(view.manual_reason||view.migration_block||(mode!=='paper'&&view.time_block)||(!feedUtcVerified()&&view?.feed?.timestamp_semantics!=='BROKER_RAW')||['MANUAL','SAFE_PAUSE','MIGRATION_BLOCK'].includes(view.phase))detail='Действия приостановлены: требуется проверка';
+  else detail=mode==='paper'?'Нет обновления панели; команды доступны, результат проверяется сервером':'Нет обновления панели';
   if(busy||pending)detail='Ожидаю подтверждения команды; повтор недоступен';
   if(view.v3_request)detail+=' · Запланирован '+view.v3_request.order_type+' по закрытию выбранной свечи';
   if(view.v3_link?.cancel)detail+=' · Отмена связанных триггеров ожидает сверки';
@@ -182,7 +184,7 @@
  }
  const commandQuoteReady=action=>mode==='paper'?(paperPriceFree(action)||paperQuoteAvailable()):quoteCurrent();
  function paperQuoteText(q=view?.paper?.command_quote){
-  if(!paperQuoteAvailable(q))return 'PAPER: последняя проверенная котировка MT5 недоступна. Действия с ценой заблокированы.';
+  if(!paperQuoteAvailable(q))return 'PAPER: последняя проверенная котировка MT5 недоступна. Команды доступны; для расчёта исполнения серверу нужна полученная цена.';
   if(q.source==='LAST_OBSERVED_MT5')return 'PAPER: последняя полученная цена MT5 · Bid '+q.bid+' / Ask '+q.ask+' · '+new Date(q.timestamp*1000).toISOString().replace('T',' ').replace('Z','')+' (время брокера).';
   return 'PAPER: '+(q.stale?'используется СТАРАЯ последняя проверенная цена MT5':'последняя проверенная цена MT5')+' · Bid '+q.bid+' / Ask '+q.ask+' · возраст '+q.age_seconds.toFixed(1)+' с · '+new Date(q.timestamp*1000).toISOString()+'. Это модель, не текущая цена исполнения LIVE.';
  }
@@ -200,12 +202,12 @@
   const wasFresh=v3Fresh,wasQuote=view?.feed?.status==='FRESH';
   if(!snapshotCurrent())v3Fresh=false;
   if(view?.feed?.status==='FRESH'&&!quoteCurrent())view.feed.status='WAITING';
-  if(view&&(wasFresh!==v3Fresh||wasQuote!==(view.feed?.status==='FRESH'))){v3Render();connectionLabel();updateBotActivity();$('paper-interrupt').disabled=true;}
+  if(view&&(wasFresh!==v3Fresh||wasQuote!==(view.feed?.status==='FRESH'))){v3Render();connectionLabel();updateBotActivity();$('paper-interrupt').disabled=paperInterruptDisabled();}
  }
  function refreshState(){expireSnapshot();return poll();}
 
  const v3Enabled=()=>view?.recovery_mode==='V3';
- const v3Blocked=(action=null)=>!view||!(mode==='paper'?paperServerReady&&commandQuoteReady(action):quoteCurrent())||busy||!!pending||view.read_only||!!view.manual_reason||!!view.migration_block||!!view.time_block;
+ const v3Blocked=(action=null)=>!view||(mode!=='paper'&&!quoteCurrent())||busy||!!pending||view.read_only||!!view.manual_reason||!!view.migration_block||(mode!=='paper'&&!!view.time_block);
  function connectionLabel(){
   const status=view?.feed?.status,verified=feedUtcVerified()||brokerTime(),fresh=brokerTime()?view?.feed?.status==='OBSERVED':quoteCurrent();
   const role=mode==='paper'?'PAPER':view?.read_only?'LIVE · READ ONLY':'LIVE';
@@ -526,13 +528,13 @@
   $('safety').textContent=''; // Safety reasons remain visible in the colored activity area, without duplicate raw labels.
   $('quote').textContent='Bid '+(view.feed.quote?.bid??'—')+' / Ask '+(view.feed.quote?.ask??'—')+' · возраст '+(view.feed.age_seconds??'—')+' сек.';
   $('source-label').textContent=(mode==='paper'?'Источник: MT5 read-only / бумажные исполнения':'Источник: MT5 / торговый контур')+' · '+(marketLabel(view.feed.timestamp)||'время MT5 не получено');
-  if(mode==='paper'){$('paper-command-quote').textContent=paperQuoteText();$('paper-command-quote').dataset.tone=view.paper?.command_quote?.stale?'warning':'info';$('paper-status').textContent=view.paper?.paused_gap?'Перерыв данных или перезапуск. Пропущенные исполнения не восстанавливаются; подтвердите продолжение.':'Моделируются только наблюдаемые свежие тики. Пропущенный путь цены неизвестен.';if(document.activeElement!==$('paper-cost'))$('paper-cost').value=view.paper?.commission_per_lot_side??'0';}
+  if(mode==='paper'){$('paper-command-quote').textContent=paperQuoteText();$('paper-command-quote').dataset.tone=view.paper?.command_quote?.stale?'warning':'info';$('paper-status').textContent=view.paper?.paused_gap?'Симуляция продолжается на полученных тиках.':'Моделируются полученные тики; отсутствующий путь цены не выдумывается.';if(document.activeElement!==$('paper-cost'))$('paper-cost').value=view.paper?.commission_per_lot_side??'0';}
   $('edit-status').textContent=view.edit?'Правка '+view.edit.stage+': показываются фактические данные брокера. При частичном отказе автоматизация остановится.':'';$('journal').textContent=view.journal.join('\n');
   $('request-status').textContent=pending?'Запрос '+pending+': '+(pendingScope===view.scope?view.action_results[pending]?.status??'ожидание':'другой контекст')+'. До сверки новые команды запрещены. При UNKNOWN проверьте журнал и брокера на VPS; перезагрузка не разрешает повтор.':'';
   for(const id of ['start','stop','reset','cancel-initial','save-settings','reverse-enable','reverse-disable','save-tp-grid','apply-level','paper-resume','paper-flatten','paper-save-cost'])$(id).disabled=!!pending||busy;
-  $('paper-resume').hidden=!view.paper?.paused_gap;
+  $('paper-resume').hidden=true;
   $('paper-flatten').disabled=!view?.cycle_id||!view.positions?.length||v3Blocked({type:'candle_close_all'});
-  $('own-entry-sl').disabled=!!pending||busy||view.read_only||!view.positions.length||(!v3Enabled()||view.v3_controls?.can_own_entry_sl!==true)||!!view.edit||!!view.manual_close||!!view.manual_reason||!!view.migration_block||!!view.time_block;
+  $('own-entry-sl').disabled=!!pending||busy||view.read_only||!view.positions.length||(!v3Enabled()||view.v3_controls?.can_own_entry_sl!==true)||!!view.edit||!!view.manual_close||!!view.manual_reason||!!view.migration_block||(mode!=='paper'&&!!view.time_block);
   $('paper-interrupt').disabled=paperInterruptDisabled();
   const interrupted=view.paper?.last_interrupt;
   $('paper-interrupt-status').textContent=interrupted?'Последнее прерывание: net цикла '+interrupted.cycle_net+' UST; сохранённый RECOVERY '+interrupted.recovery_retained+' UST. Новый цикл только по кнопке «Старт».':'';
@@ -543,7 +545,7 @@
   $('reverse-enable').title=view.reverse_controls?.reason??'';$('reverse-disable').title=view.reverse_controls?.reason??'';
   if(loadedScope!==view.scope){fields();loadedScope=view.scope;}v3Render();draw();
  }
- async function poll(){if(polling||busy)return;polling=true;pollTask=(async()=>{const started=performance.now();try{const r=await fetch(apiPath('state'),{headers:headers(),signal:AbortSignal.timeout(2500)});if(!r.ok){if([401,403].includes(r.status)){$('login').hidden=false;$('workspace').hidden=true;}throw Error('Нет авторизованного снимка');}const v=await r.json();if(v.contract!=='ticket_basket_v1'||(mode==='paper'?v.mode!=='PAPER':v.mode==='PAPER'))throw Error('Несовместимая версия контроллера');view=v;acceptSnapshotFreshness(v,started);observeMt5DisplayClock();const status=pending&&pendingScope===v.scope?v.action_results[pending]?.status:null;if(['APPLIED','REJECTED','CONFLICT'].includes(status)){lastActionReceipt={status,reason:v.action_results[pending]?.reason,paper_quote:v.action_results[pending]?.paper_quote};clearPending();}$('login').hidden=true;$('workspace').hidden=false;render();}catch(e){v3Fresh=false;mt5DisplayAnchor=null;renderMt5TimeControls();paperServerReady=false;if(view){v3Render();connectionLabel();updateBotActivity();$('paper-interrupt').disabled=true;}$('feed-status').textContent='Нет свежего снимка';}finally{polling=false;}})();return pollTask;}
+ async function poll(){if(polling||busy)return;polling=true;pollTask=(async()=>{const started=performance.now();try{const r=await fetch(apiPath('state'),{headers:headers(),signal:AbortSignal.timeout(2500)});if(!r.ok){if([401,403].includes(r.status)){$('login').hidden=false;$('workspace').hidden=true;}throw Error('Нет авторизованного снимка');}const v=await r.json();if(v.contract!=='ticket_basket_v1'||(mode==='paper'?v.mode!=='PAPER':v.mode==='PAPER'))throw Error('Несовместимая версия контроллера');view=v;acceptSnapshotFreshness(v,started);observeMt5DisplayClock();const status=pending&&pendingScope===v.scope?v.action_results[pending]?.status:null;if(['APPLIED','REJECTED','CONFLICT'].includes(status)){lastActionReceipt={status,reason:v.action_results[pending]?.reason,paper_quote:v.action_results[pending]?.paper_quote};clearPending();}$('login').hidden=true;$('workspace').hidden=false;render();}catch(e){v3Fresh=false;paperServerReady=false;if(view){v3Render();connectionLabel();updateBotActivity();$('paper-interrupt').disabled=paperInterruptDisabled();}$('feed-status').textContent='Нет обновления панели; последняя информация сохранена';}finally{polling=false;}})();return pollTask;}
  const defaultPrefs={mainTrend:false,mainCycle:true,pane:null,pattern:{trend:false,cycle:true},figure:{trend:false,cycle:true},liquidity:false,opacity:20,colors:{BUY:'#26a69a',SELL:'#ef5350',sl:'#ef5350',tp:'#26a69a',entry:'#e0b565',up:'#26a69a',down:'#ef5350',grid:'#25282e',zone:'#e0b565'}};
  let prefs=structuredClone(defaultPrefs);try{const saved=JSON.parse(localStorage.getItem('chart-preferences-v1')??'null');if(saved){for(const k of ['mainTrend','mainCycle','liquidity'])if(typeof saved[k]==='boolean')prefs[k]=saved[k];if(['pattern','figure',null].includes(saved.pane))prefs.pane=saved.pane;for(const pane of ['pattern','figure'])for(const k of ['trend','cycle'])if(typeof saved[pane]?.[k]==='boolean')prefs[pane][k]=saved[pane][k];if(Number.isFinite(saved.opacity))prefs.opacity=Math.max(0,Math.min(100,saved.opacity));for(const k of Object.keys(prefs.colors))if(/^#[0-9a-f]{6}$/i.test(saved.colors?.[k]))prefs.colors[k]=saved.colors[k];}}catch{}
  const savePrefs=()=>{localStorage.setItem('chart-preferences-v1',JSON.stringify(prefs));layout();draw();};
@@ -556,9 +558,9 @@
  $('zone-opacity').oninput=e=>{prefs.opacity=Number(e.target.value);savePrefs();};
  const colorNames={BUY:'BUY STOP',SELL:'SELL STOP',sl:'SL',tp:'TP',entry:'Вход',up:'Растущая свеча',down:'Падающая свеча',grid:'Сетка',zone:'Будущие зоны'};
  for(const [k,v]of Object.entries(prefs.colors)){const label=document.createElement('label');label.textContent=colorNames[k];const input=document.createElement('input');input.type='color';input.id='color-'+k;input.value=v;input.oninput=()=>{prefs.colors[k]=input.value;savePrefs();};label.append(input);$('color-fields').append(label);}
- $('paper-resume').onclick=async()=>{if(mode!=='paper'||!view?.paper?.paused_gap||!confirm('Продолжить после перезапуска с новых наблюдений MT5? Пропущенные исполнения не восстанавливаются; текущий разрыв цены может дать исполнение на следующем тике.'))return;try{await send({type:'paper_resume'});}catch(e){error(e.message);}};
+ $('paper-resume').hidden=true; // Compatibility element; reconnects do not pause PAPER.
  // Explicit PAPER-only settlement. Capture scope, cycle and obligations before confirmation.
- function paperInterruptDisabled(){return mode!=='paper'||!view||!paperServerReady||!commandQuoteReady({type:'paper_interrupt'})||!!pending||busy||view.read_only||!view.cycle_id||!!view.migration_block||!!view.time_block;}
+ function paperInterruptDisabled(){return mode!=='paper'||!view||!!pending||busy||view.read_only||!view.cycle_id||!!view.migration_block||(mode!=='paper'&&!!view.time_block);}
  $('paper-interrupt').onclick=async()=>{
   if(paperInterruptDisabled())return;
   const v=view,revision=v.revision,scope=v.scope;

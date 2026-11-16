@@ -95,13 +95,13 @@ async function main(){
  assert(!$('safety').textContent.includes('WAIT_REFERENCE'));
  assert($('safety').textContent.includes('Блокировка сохранена'));
  assert($('safety').textContent.includes('Проверить время'));
- assert.equal($('candle-settings-save').disabled,true);
+ assert.equal($('candle-settings-save').disabled,false);
  assert.equal(ctx.view.time_block.reason,'MT5_UTC_WAIT_REFERENCE');
  delete ctx.view.time_status;assert(vm.runInContext('timeSafetyText()',ctx).includes('MT5_UTC_WAIT_REFERENCE'),'legacy snapshot fallback');
  ctx.view.time_status={latched_reason:'MT5_UTC_WAIT_REFERENCE',current_reason:null};
  vm.runInContext(safetyLine+'\nv3Render()',ctx);
  assert.equal($('safety').textContent,'');
- $('safety').textContent=vm.runInContext('timeSafetyText()',ctx);assert.equal($('candle-settings-save').disabled,true,'null current reason cannot clear latch');
+ $('safety').textContent=vm.runInContext('timeSafetyText()',ctx);assert.equal($('candle-settings-save').disabled,false,'PAPER ignores time latch');
  ctx.view.time_block=null;vm.runInContext(safetyLine,ctx);assert.equal($('safety').textContent,'','presentation status cannot establish latch');
  ctx.view=structuredClone(base);vm.runInContext('v3Render()',ctx);
  // Execute the actual existing-button render assignment, retaining all legacy guards.
@@ -112,7 +112,7 @@ async function main(){
  ctx.view.v3_controls.can_own_entry_sl=false;renderOwn();assert.equal($('own-entry-sl').disabled,true,'two groups rejected by backend flag');
  delete ctx.view.v3_controls.can_own_entry_sl;renderOwn();assert.equal($('own-entry-sl').disabled,true,'missing V3 permission fails closed');
  ctx.view.v3_controls.can_own_entry_sl=true;
- for(const field of ['read_only','edit','manual_close','manual_reason','migration_block','time_block']){ctx.view[field]=true;renderOwn();assert.equal($('own-entry-sl').disabled,true,field);ctx.view[field]=false;}
+ for(const field of ['read_only','edit','manual_close','manual_reason','migration_block']){ctx.view[field]=true;renderOwn();assert.equal($('own-entry-sl').disabled,true,field);ctx.view[field]=false;}
  ctx.busy=true;renderOwn();assert.equal($('own-entry-sl').disabled,true);ctx.busy=false;
  ctx.pending='unknown';renderOwn();assert.equal($('own-entry-sl').disabled,true);ctx.pending=null;
  ctx.view.recovery_mode='V1';renderOwn();assert.equal($('own-entry-sl').disabled,true,'V1 pending behavior unchanged');
@@ -156,12 +156,12 @@ async function main(){
  $('recovery-profile-new').onclick();$('recovery-profile-name').value='<img src=x onerror=alert(1)>';await $('recovery-profile-save').onclick();assert.equal(actions.at(-1).a.profiles.at(-1).name,'<img src=x onerror=alert(1)>');
  $('recovery-sl-distance').value='2.25';await $('recovery-save-sl').onclick();assert.equal(actions.at(-1).a.recovery_sl_distance,'2.25');
  ctx.view=structuredClone(base);vm.runInContext('v3Render()',ctx);assert($('recovery-current-summary').textContent.includes('g1'));assert($('recovery-current-summary').textContent.includes('0.06'));
- for(const block of ['busy','pending','read_only','stale']){
+ for(const block of ['busy','pending','read_only']){
   ctx.busy=block==='busy';ctx.pending=block==='pending'?'req':null;ctx.view.read_only=block==='read_only';vm.runInContext('paperServerReady='+String(block!=='stale')+';v3Fresh='+String(block!=='stale')+';v3Render()',ctx);
   before=actions.length;await $('v3-link-toggle').onclick();await $('candle-settings-save').onclick();await $('v3-sl-plus').onclick();await $('v3-sl-confirm').onclick();await $('recovery-profile-apply').onclick();await $('recovery-profile-save').onclick();await $('recovery-save-sl').onclick();assert.equal(actions.length,before,block);assert.equal($('v3-link-toggle').disabled,true);
  }
  ctx.busy=false;ctx.pending=null;ctx.view.read_only=false;vm.runInContext('paperServerReady=true;v3Fresh=true',ctx);
- vm.runInContext('paperServerReady=true;v3Fresh=false;v3Render()',ctx);
+ vm.runInContext('paperServerReady=false;v3Fresh=false;v3Render()',ctx);
  assert.equal($('candle-settings-save').disabled,false,'PAPER server-fresh state remains actionable despite client delay');
  vm.runInContext('v3Fresh=true',ctx);
  ctx.view.recovery_mode='V1';ctx.view.migration_block='Legacy active cycle needs reconciliation';vm.runInContext('v3Render()',ctx);
@@ -218,10 +218,10 @@ async function main(){
  ctx.view=structuredClone(base);ctx.view.paper.command_quote={available:false};ctx.view.feed.status='WAITING';ctx.view.v3_request={order_type:'STOP'};ctx.view.v3_link={};ctx.view.v3_controls.can_cancel_link=true;ctx.view.v3_controls.can_cancel_entry=true;
  vm.runInContext('paperServerReady=true;v3Render()',ctx);
  for(const id of ['v3-cancel-request','v3-cancel-entry','v3-link-toggle'])assert.equal($(id).disabled,false,id);
- for(const id of ['candle-settings-save','v3-sl-plus'])assert.equal($(id).disabled,true,id);
+ for(const id of ['candle-settings-save','v3-sl-plus'])assert.equal($(id).disabled,false,id);
  for(const id of ['v3-cancel-request','v3-cancel-entry','v3-link-toggle']){await $(id).onclick();assert(actions.at(-1).a.type.startsWith('v3_cancel'));}
  ctx.pending='unknown';vm.runInContext('v3Render()',ctx);assert($('v3-cancel-entry').disabled);ctx.pending=null;
- vm.runInContext('paperServerReady=false;v3Render()',ctx);assert($('v3-cancel-entry').disabled);
+ vm.runInContext('paperServerReady=false;v3Render()',ctx);assert(!$('v3-cancel-entry').disabled);
  console.log('PASS Node V3 handler tests: actual source, DOM doubles, inputs/actions/revisions, V3-only controls, legacy migration guard, confirmation/cancel, controls, stale/read-only/UNKNOWN guards. Browser layout NOT verified.');
 }
 main().catch(e=>{console.error(e);process.exit(1);});
