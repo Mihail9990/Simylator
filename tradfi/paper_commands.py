@@ -12,13 +12,18 @@ def reject(message):
 class PaperCommandMailbox(OwnerMailbox):
     @staticmethod
     def _require_fresh(action, view, *, stage=None, queue_age=None):
-        # Local obligations must be current. Quote availability/validity is checked
-        # by the owner against its own persisted PAPER state, not an HTTP cache.
-        if action in ({'type':'command','text':'/stop'}, {'type':'command','text':'/resume_time'}):
+        # PAPER commands use authoritative local state, not cache or quote age.
+        return
+
+    def _guard_execution(self, action, preview):
+        # Preserve reviewed obligations and settings, but not timing deadlines.
+        _published_at, _view, _queued_at, context = preview
+        if action in ({'type':'command','text':'/stop'}, {'type':'command','text':'/resume_time'}, {'type':'command','text':'/sync_mt5_time'}):
             return
-        if not view.get('snapshot_freshness', {}).get('fresh'):
-            raise SnapshotStale('SNAPSHOT_STALE', stage=stage,
-                                snapshot_age=view.get('snapshot_freshness', {}).get('age_seconds'), queue_age=queue_age)
+        if self.current_execution_view is not None and context is not None:
+            current = self.current_execution_view()
+            if self._command_context(current) != context:
+                raise SnapshotStale('CONTEXT_CHANGED', stage='execution_context')
 
 
 def quote_info(exchange):

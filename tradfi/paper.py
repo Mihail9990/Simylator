@@ -20,7 +20,9 @@ class PaperExchange:
         self.p=json.loads(row[0]) if row else dict(identity='PAPER-'+uuid.uuid4().hex,orders=[],positions=[],deals=[],order_history=[],results={},cursor=None,cursor_keys=[],commission_per_lot_side='0',paused_gap=False)
         self.account=self.p['identity'];self.boot=True
         self.command_baseline=None;self.command_quote=None
-        if row and (self.p['orders'] or self.p['positions']):self.p['paused_gap']=True
+        # Old restart/gap latches do not pause a simulator. Explicit stop is
+        # independently persisted by the controller and is never cleared here.
+        self.p['paused_gap']=False
         self.persist()
     def persist(self):
         try:self.store.db.execute('INSERT OR REPLACE INTO paper_exchange VALUES(1,?)',(json.dumps(self.p,sort_keys=True,allow_nan=False),))
@@ -68,12 +70,10 @@ class PaperExchange:
         stamp=market['tick_msc'];key=hashlib.sha256(json.dumps(market['quote'],sort_keys=True).encode()).hexdigest()
         previous=self.p['cursor']
         if previous is not None and ((not raw_mode and stamp<previous) or (stamp==previous and key in self.p['cursor_keys'])):return
-        if not raw_mode and previous is not None and stamp-previous>5000 and (self.p['orders'] or self.p['positions']):self.p['paused_gap']=True
-        # First sample after restart is a baseline, never an inferred historical fill.
-        baseline=self.boot;self.boot=False
+        # Execute only this observed sample, never reconstruct missing ticks.
+        self.boot=False
         if previous!=stamp:self.p['cursor_keys']=[]
         self.p['cursor']=stamp;self.p['cursor_keys'].append(key)
-        if baseline or self.p['paused_gap']:self.persist();return
         q=market['quote']
         def close_crossed():
             for p in list(self.p['positions']):
@@ -104,7 +104,6 @@ class PaperExchange:
         kind=cmd['kind'];result={'status':'REJECTED','never_sent':True}
         try:
             snap=self.snapshot();spec=Spec.load(snap['spec']);q=snap['quote']
-            if self.p['paused_gap'] and kind not in {'CANCEL'} and self.command_baseline is None:raise ValueError('Paper gap needs confirmation')
             if kind in {'STOP','MARKET'}:
                 if cmd['side'] not in {'BUY','SELL'}:raise ValueError('side')
                 size=number(cmd['size']);price=spec.price(q['ask' if cmd['side']=='BUY' else 'bid'] if kind=='MARKET' else cmd['price']);sign=1 if cmd['side']=='BUY' else -1
@@ -152,7 +151,10 @@ class PaperSession:
             self.store.close()
             raise
         self.exchange=PaperExchange(self.store,clock=clock)
-        self.controller=CandleRecoveryController(self.store,self.exchange,clock=clock,monotonic=monotonic)
+        from .paper_time_policy import PaperTimePolicy
+        class SimulationController(PaperTimePolicy, CandleRecoveryController):
+            pass
+        self.controller=SimulationController(self.store,self.exchange,clock=clock,monotonic=monotonic)
         from .paper_interrupt import recover_receipts
         recover_receipts(self)
         from .paper_commands import PaperCommandMailbox
@@ -188,8 +190,6 @@ class PaperSession:
             except (ValueError,AssertionError):raise ActionRejected('Нужна неотрицательная модель комиссии')
             self.exchange.p['commission_per_lot_side']=str(value);self.exchange.persist();return
         if a==dict(type='paper_resume'):
-            self._fresh()
-            if self.controller._deadline_guard():raise ActionRejected('Нужна ручная сверка: цикл ограничен временем или уже остановлен защитой')
             self.exchange.p['paused_gap']=False;self.exchange.persist();return
         if a==dict(type='paper_flatten',confirmed=True):
             snap=self._fresh()
@@ -214,12 +214,6 @@ class PaperSession:
                 self.reader.align_time()
             elif self.reader.safety.check():raise ActionRejected('Ожидаются проверенные свежие данные MT5')
             return
-        if self.exchange.p['paused_gap'] and a==dict(type='command',text='/stop'):
-            self.controller.command('/stop')
-            for o in list(self.exchange.p['orders']):
-                self.exchange.p['orders'].remove(o);o['status']='CANCELLED';self.exchange.p['order_history'].append(o)
-            self.exchange.persist();return
-        if self.exchange.p['paused_gap'] and a!=dict(type='command',text='/stop') and self.exchange.command_baseline is None:raise ActionRejected('После перерыва подтвердите продолжение симуляции без восстановления пропущенных тиков')
         if a!=dict(type='command',text='/stop'):self._fresh()
         return self.controller.action(a)
     def _execution_view(self):
@@ -246,11 +240,7 @@ class PaperSession:
             before=time.perf_counter(); market=self.reader.read(); marks['read_ms']=(time.perf_counter()-before)*1000
             before=time.perf_counter(); self.exchange.observe(market); marks['observe_ms']=(time.perf_counter()-before)*1000
             before=time.perf_counter()
-            if not self.exchange.p['paused_gap']:self.controller.tick()
-            elif (self.controller.state.get('cycle') or {}).get('manual_reason')=='TP1_OWN_ENTRY_SL_UNAVAILABLE':
-                # Recover only this obsolete policy latch; the independent
-                # restart/data-gap pause still requires explicit PAPER resume.
-                self.controller._restore_paper_tp1_pause(self.controller.snapshot())
+            self.controller.tick()
             marks['tick_ms']=(time.perf_counter()-before)*1000
             self.snapshot=self.exchange.snapshot()
             self._execution_ok=True

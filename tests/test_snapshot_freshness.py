@@ -260,7 +260,7 @@ class SnapshotFreshnessTest(unittest.TestCase):
         self.assertEqual(self.store.load()['control_receipts'][request['id']]['status'], 'UNKNOWN')
         self.assertEqual(self.controller.state['control_revision'], 1)
 
-    def test_paper_session_refresh_cannot_execute_an_expired_queued_action(self):
+    def test_paper_session_has_no_queue_expiry(self):
         from test_tradfi_paper import Reader
         from tradfi.paper import PaperSession
         reader = Reader()
@@ -274,8 +274,8 @@ class SnapshotFreshnessTest(unittest.TestCase):
         self.now += 3
         reader.tick('4000', '4000.1', seconds=3)
         paper.step()
-        self.assertEqual(paper.exchange.p['commission_per_lot_side'], '0')
-        self.assertEqual(paper.mailbox.view()['action_results'][request['id']]['status'], 'REJECTED')
+        self.assertEqual(paper.exchange.p['commission_per_lot_side'], '2')
+        self.assertEqual(paper.mailbox.view()['action_results'][request['id']]['status'], 'APPLIED')
         self.assertTrue(paper.mailbox.view()['snapshot_freshness']['fresh'])
         self.assertEqual(paper.mailbox.view()['feed']['status'], 'FRESH')
         paper.mailbox.submit(dict(request, id='paper-fresh-002', revision=1))

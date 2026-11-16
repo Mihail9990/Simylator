@@ -1,4 +1,4 @@
-"""PAPER-only current execution evidence, reviewed context and finite queue TTL."""
+"""PAPER commands ignore age deadlines but preserve current reviewed context."""
 from copy import deepcopy
 from pathlib import Path
 import tempfile
@@ -36,16 +36,12 @@ class PaperOwnerFreshnessTest(unittest.TestCase):
         self.assertEqual(self.paper.exchange.p['commission_per_lot_side'],'2')
         self.assertFalse(self.paper.mailbox.requests.qsize())
 
-    def test_three_second_queue_boundary_rejects_even_with_new_fresh_quote(self):
-        for seconds in (3, 3.1):
-            request=self.request(str(seconds).replace('.','-'));self.paper.mailbox.submit(request)
+    def test_queue_age_never_expires_an_unchanged_paper_command(self):
+        for seconds in (3, 30, 300):
+            request=self.request(str(seconds));self.paper.mailbox.submit(request)
             self.delayed(seconds);self.paper.step()
-            self.assertEqual(self.status(request),'REJECTED')
-            self.assertEqual(self.paper.exchange.p['commission_per_lot_side'],'0')
-            completed=[r for r in self.paper.diagnostics.drain() if r['event']=='action_completed'][-1]
-            self.assertEqual(completed['error_code'],'QUEUE_EXPIRED')
-            self.assertEqual(completed['guard_stage'],'execution_queue')
-            self.assertAlmostEqual(completed['queue_age_seconds'],seconds)
+            self.assertEqual(self.status(request),'APPLIED')
+            self.assertEqual(self.paper.exchange.p['commission_per_lot_side'],'2')
 
     def test_stale_quote_does_not_block_explicit_local_cost_command(self):
         request=self.request();self.paper.mailbox.submit(request)
@@ -55,31 +51,24 @@ class PaperOwnerFreshnessTest(unittest.TestCase):
         self.assertEqual(self.paper.exchange.p['commission_per_lot_side'],'2')
         self.assertTrue(self.paper.controller.state['control_receipts'][request['id']]['paper_quote']['stale'])
 
-    def test_slow_current_read_is_not_made_fresh(self):
+    def test_slow_current_read_does_not_block_commands(self):
         request=self.request();self.paper.mailbox.submit(request)
         read=self.reader.read
         def slow():
-            self.now+=2.1
+            self.now+=20
             return read()
         with patch.object(self.reader,'read',slow):self.paper.step()
-        self.assertEqual(self.status(request),'REJECTED')
-        completed=[r for r in self.paper.diagnostics.drain() if r['event']=='action_completed'][-1]
-        self.assertEqual(completed['error_code'],'SNAPSHOT_STALE')
-        self.assertAlmostEqual(completed['snapshot_age_seconds'],2.1)
+        self.assertEqual(self.status(request),'APPLIED')
 
-    def test_queue_deadline_is_rechecked_after_current_view_work(self):
+    def test_slow_context_projection_does_not_expire_commands(self):
         request=self.request();self.paper.mailbox.submit(request);self.delayed(2.5)
         current=self.paper.mailbox.current_execution_view
         def slow():
-            self.now+=.6
+            self.now+=60
             return current()
         self.paper.mailbox.current_execution_view=slow
         self.paper.step()
-        self.assertEqual(self.status(request),'REJECTED')
-        self.assertEqual(self.paper.exchange.p['commission_per_lot_side'],'0')
-        completed=[r for r in self.paper.diagnostics.drain() if r['event']=='action_completed'][-1]
-        self.assertEqual(completed['error_code'],'QUEUE_EXPIRED')
-        self.assertAlmostEqual(completed['queue_age_seconds'],3.1)
+        self.assertEqual(self.status(request),'APPLIED')
 
     def test_changed_context_between_client_get_and_post_refuses_token(self):
         from tradfi.control import SnapshotStale
@@ -112,10 +101,10 @@ class PaperOwnerFreshnessTest(unittest.TestCase):
         other['context_token']='f'*64
         with self.assertRaises(SnapshotStale):self.paper.mailbox.submit(other)
 
-    def test_legacy_request_keeps_original_preview_deadline(self):
+    def test_legacy_request_has_no_preview_deadline(self):
         request=self.request();request.pop('context_token')
         self.paper.mailbox.submit(request);self.delayed();self.paper.step()
-        self.assertEqual(self.status(request),'REJECTED')
+        self.assertEqual(self.status(request),'APPLIED')
 
     def test_projection_time_does_not_make_old_quote_fresh(self):
         request=self.request();self.paper.mailbox.submit(request)
@@ -163,25 +152,23 @@ class PaperOwnerFreshnessTest(unittest.TestCase):
         self.assertEqual(self.status(request),'APPLIED');self.assertEqual(len(calls),1)
         self.paper.mailbox.submit(request);self.paper.step();self.assertEqual(len(calls),1)
 
-    def test_reservation_delay_rechecks_current_freshness_and_is_logged(self):
+    def test_reservation_delay_does_not_expire_current_command(self):
         request=self.request();self.paper.mailbox.submit(request)
         save=self.paper.controller.save
         def slow(event):
             result=save(event)
-            if event=='control_action_reserved':self.now+=2.1
+            if event=='control_action_reserved':self.now+=20
             return result
         with patch.object(self.paper.controller,'save',slow):self.paper.step()
-        self.assertEqual(self.status(request),'REJECTED')
+        self.assertEqual(self.status(request),'APPLIED')
         completed=[r for r in self.paper.diagnostics.drain() if r['event']=='action_completed'][-1]
-        self.assertEqual(completed['guard_stage'],'execution_current')
         self.assertIn('reservation_ms',completed)
-        self.assertAlmostEqual(completed['snapshot_age_seconds'],2.1)
 
 
 class ManualOrderFreshnessTest(unittest.TestCase):
     def test_manual_market_delay_expiry_and_replay(self):
         import test_paper_interrupt as fixture
-        for delay, expected in ((2.1,'APPLIED'),(3.001,'REJECTED')):
+        for delay, expected in ((2.1,'APPLIED'),(30,'APPLIED')):
             with self.subTest(delay=delay):
                 f=fixture.PaperInterruptTest();f.setUp()
                 try:
@@ -205,3 +192,24 @@ class ManualOrderFreshnessTest(unittest.TestCase):
                     self.assertEqual(len(p.exchange.p['positions']),6)
                 finally:
                     f.tearDown();f.doCleanups()
+
+class PaperTechnicalLatchTest(unittest.TestCase):
+    def test_clock_latches_clear_but_explicit_stop_and_strategy_manual_survive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reader=Reader()
+            paper=PaperSession(Path(tmp)/'paper.db',reader,clock=lambda:reader.now,monotonic=lambda:reader.now)
+            try:
+                paper.step();paper.action({'type':'command','text':'/start'})
+                reader.tick('4000','4000.1',seconds=30,bar=('3999','4000'));paper.step()
+                c=paper.controller.state['cycle'];self.assertIsNotNone(c)
+                c.update(manual=True,manual_reason='UTC_CLOCK_MOVED_BACKWARDS')
+                paper.controller.state.update(stop=True,time_block={'reason':'OLD_TIME_GATE'},phase='MANUAL')
+                paper.controller.save('fixture')
+                paper.controller._deadline_guard();paper.controller._time_guard()
+                self.assertFalse(c.get('manual'));self.assertTrue(paper.controller.state['stop'])
+                self.assertEqual(paper.controller.state['phase'],'PAUSED_CYCLE')
+                self.assertFalse(paper.controller.state.get('time_block'))
+                c.update(manual=True,manual_reason='RECOVERY_LIMIT');paper.controller.save('fixture')
+                self.assertTrue(paper.controller._deadline_guard())
+                self.assertEqual(c['manual_reason'],'RECOVERY_LIMIT')
+            finally:paper.close()

@@ -4,7 +4,7 @@ const src=fs.readFileSync(path.join(__dirname,'../web/basket-panel/panel.js'),'u
 const nodes={},$=id=>nodes[id]??={dataset:{},textContent:'',hidden:false,disabled:false};
 let now=1000,calls=0,release=null;
 const fresh=()=>({contract:'ticket_basket_v1',mode:'PAPER',paper:{command_quote:{available:true,bid:'100',ask:'101',timestamp:1804800000,age_seconds:0,stale:false,source:'LAST_VERIFIED_MT5'}},scope:'paper',revision:4,command_context_token:'a'.repeat(64),phase:'V3_WAIT_ENTRY',snapshot_freshness:{fresh:true,age_seconds:0,max_age_seconds:2},feed:{status:'FRESH',timestamp_semantics:'VERIFIED',age_seconds:0},action_results:{}});
-const ctx=vm.createContext({$,performance:{now:()=>now},view:null,mode:'paper',busy:false,polling:false,pending:null,pendingScope:null,lastActionReceipt:null,preview:null,headers:()=>({}),apiPath:k=>'/api/paper/'+k,AbortSignal:{timeout:()=>null},render:()=>{},v3Render:()=>{},connectionLabel:()=>{},updateBotActivity:()=>{},feedUtcVerified:()=>ctx.view?.feed?.timestamp_semantics==='VERIFIED',clearPending:()=>{ctx.pending=null;ctx.pendingScope=null;},notice:()=>{},localStorage:{setItem:()=>{}},storageKey:x=>x,crypto:{randomUUID:()=> 'fixture-request'},fetch:async()=>{calls++;return new Promise(resolve=>{release=resolve;});}});
+const ctx=vm.createContext({$,performance:{now:()=>now},view:null,mode:'paper',busy:false,polling:false,pending:null,pendingScope:null,lastActionReceipt:null,preview:null,headers:()=>({}),apiPath:k=>'/api/paper/'+k,AbortSignal:{timeout:()=>null},render:()=>{},v3Render:()=>{},connectionLabel:()=>{},updateBotActivity:()=>{},paperInterruptDisabled:()=>false,feedUtcVerified:()=>ctx.view?.feed?.timestamp_semantics==='VERIFIED',clearPending:()=>{ctx.pending=null;ctx.pendingScope=null;},notice:()=>{},localStorage:{setItem:()=>{}},storageKey:x=>x,crypto:{randomUUID:()=> 'fixture-request'},fetch:async()=>{calls++;return new Promise(resolve=>{release=resolve;});}});
 vm.runInContext(src.slice(src.indexOf(' let v3Fresh=false'),src.indexOf(' const v3Enabled=')),ctx);
 vm.runInContext(src.slice(src.indexOf(' async function poll(){'),src.indexOf(' const defaultPrefs=')),ctx);
 vm.runInContext(src.slice(src.indexOf(' async function send('),src.indexOf(' async function command(')),ctx);
@@ -24,39 +24,20 @@ const accept=(v,start=now)=>{ctx.view=v;ctx.sample=v;ctx.started=start;run('acce
  ctx.busy=true;await run('poll()');assert.equal(calls,1,'busy send prevents poll overlap');ctx.busy=false;
  ctx.fetch=async()=>{calls++;const v=fresh();v.snapshot_freshness={fresh:false,age_seconds:3,max_age_seconds:2};return{ok:true,json:async()=>v};};
  await run('poll()');assert.equal(run('v3Fresh'),false,'HTTP200 cached snapshot does not revive freshness');
- const before=calls;await assert.rejects(run("send({type:'v3_entry'})"),/Нет свежего снимка/);assert.equal(calls,before+1,'stale guard refreshes state only, sends no trade');
- // Safe emergency stop remains available, even while publication is stale.
- ctx.fetch=async url=>{calls++;return{ok:true,json:async()=>url.endsWith('action')?{status:'APPLIED'}:fresh()};};
- await run("send({type:'command',text:'/stop'})");assert.equal(calls,before+3);
- // PAPER accepts a slow but server-fresh response, never fabricates local freshness.
- accept(fresh());run('v3Fresh=false');let slowPosts=0;
- ctx.fetch=async url=>{if(url.endsWith('action')){slowPosts++;return{ok:true,json:async()=>({status:'APPLIED'})};}now+=2100;return{ok:true,json:async()=>fresh()};};
+ // Snapshot age is display metadata only for PAPER commands.
+ let posts=0,gets=0;
+ ctx.fetch=async (url,options)=>{if(url.endsWith('action')){posts++;assert.equal(JSON.parse(options.body).context_token,'a'.repeat(64));return{ok:true,json:async()=>({status:'APPLIED'})};}gets++;throw Error('poll unavailable');};
  await run("send({type:'v3_settings',entry_distance:'1'})");
- assert.equal(slowPosts,1);assert.equal(run('quoteCurrent()'),false);assert.equal(run('paperServerReady'),true);
- // LIVE does not receive the PAPER-only relaxation.
- ctx.mode='live';accept(fresh());run('v3Fresh=false');slowPosts=0;
- await assert.rejects(run("send({type:'v3_settings'})"),/Нет свежего/);assert.equal(slowPosts,0);ctx.mode='paper';
- // Modal/network gaps: one safe read can recover the same reviewed state.
- accept(fresh());run('v3Fresh=false');let posts=0,gets=0;
- ctx.fetch=async (url,options)=>{if(url.endsWith('action')){posts++;assert.equal(JSON.parse(options.body).context_token,'a'.repeat(64));return{ok:true,json:async()=>({status:'APPLIED'})};}gets++;return{ok:true,json:async()=>fresh()};};
- await run("send({type:'v3_settings',entry_distance:'1'})");
- assert.equal(posts,1);assert.equal(gets,2,'preflight GET plus receipt reconciliation');
- // A changed revision must not silently rebase what was confirmed.
- accept(fresh());run('v3Fresh=false');posts=0;
- ctx.fetch=async url=>{if(url.endsWith('action')){posts++;throw Error('unexpected POST');}return{ok:true,json:async()=>({...fresh(),revision:5})};};
- await assert.rejects(run("send({type:'v3_settings'})"),/изменились/);assert.equal(posts,0);
- // Same revision with a changed server context token also requires reconfirmation.
- accept(fresh());run('v3Fresh=false');posts=0;
- ctx.fetch=async url=>{if(url.endsWith('action')){posts++;throw Error('unexpected POST');}return{ok:true,json:async()=>({...fresh(),command_context_token:'b'.repeat(64)})};};
- await assert.rejects(run("send({type:'v3_settings'})"),/изменились/);assert.equal(posts,0);
- // Offline GET cannot authorize a POST; an unknown POST is never retried.
- accept(fresh());run('v3Fresh=false');posts=0;
- ctx.fetch=async url=>{if(url.endsWith('action'))posts++;throw Error('offline');};
- await assert.rejects(run("send({type:'v3_settings'})"),/Нет свежего/);assert.equal(posts,0);
- accept(fresh());posts=0;
- ctx.fetch=async url=>{if(url.endsWith('action')){posts++;throw Error('response lost');}return{ok:true,json:async()=>fresh()};};
- await assert.rejects(run("send({type:'v3_settings'})"),/response lost/);assert.equal(posts,1);assert(ctx.pending);
- await assert.rejects(run("send({type:'v3_settings'})"),/Повтор запрещён/);assert.equal(posts,1);
+ assert.equal(posts,1);assert.equal(gets,1,'no preflight; receipt polling may fail');
+ assert.equal(ctx.pending,null,'applied receipt survives failed poll');
+ assert.equal($('paper-interrupt').disabled,false,'poll failure does not disable interrupt');
+ // LIVE retains freshness rules; no simulator relaxation leaks into the live path.
+ ctx.mode='live';accept(fresh());run('v3Fresh=false');
+ await assert.rejects(run("send({type:'v3_settings'})"),/Нет свежего/);assert.equal(posts,1);ctx.mode='paper';
+ // An uncertain POST is never blindly repeated or fabricated as successful.
+ accept(fresh());ctx.fetch=async url=>{if(url.endsWith('action')){posts++;throw Error('response lost');}return{ok:true,json:async()=>fresh()};};
+ await assert.rejects(run("send({type:'v3_settings'})"),/response lost/);assert.equal(posts,2);assert(ctx.pending);
+ await assert.rejects(run("send({type:'v3_settings'})"),/Повтор запрещён/);assert.equal(posts,2);
  assert(src.includes('setInterval(refreshState,500)'),'half-second cadence');
  console.log('PASS 500ms nonoverlap, monotonic publication/quote expiry, malformed/stale200 fail-closed, slow responses, no stale trade and emergency stop');
 })().catch(e=>{console.error(e);process.exitCode=1;});

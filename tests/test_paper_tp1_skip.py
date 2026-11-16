@@ -65,7 +65,7 @@ class PaperTP1SkipTest(unittest.TestCase):
         self.f.reader.data['spec']['freeze_level']=0;self.f.step(5)
         self.assertEqual(self.modify_ids(),before);self.assert_retained()
         self.p.close();self.f.create();self.f.step()
-        self.assertTrue(self.p.exchange.p['paused_gap'])
+        self.assertFalse(self.p.exchange.p['paused_gap'])
         self.f.action(dict(type='paper_resume'));self.f.step(5)
         self.assertEqual(self.g['entry_sl_once']['status'],'SKIPPED')
         self.assertEqual(self.modify_ids(),before);self.assert_retained()
@@ -79,7 +79,7 @@ class PaperTP1SkipTest(unittest.TestCase):
 
     def test_existing_pause_restart_does_not_remove_independent_gap_pause(self):
         self.tp1(legacy=True);self.p.close();self.f.create();self.f.step()
-        self.assertFalse(self.c.get('manual'));self.assertTrue(self.p.exchange.p['paused_gap'])
+        self.assertFalse(self.c.get('manual'));self.assertFalse(self.p.exchange.p['paused_gap'])
         self.assertEqual(self.g['entry_sl_once']['status'],'SKIPPED');self.assert_retained()
         self.f.action(dict(type='paper_resume'));self.f.step()
         self.assertFalse(self.p.exchange.p['paused_gap']);self.assert_retained()
@@ -108,10 +108,10 @@ class PaperTP1SkipTest(unittest.TestCase):
         self.assertFalse(self.p.controller._restore_paper_tp1_pause(self.p.controller.snapshot()))
         self.assertTrue(self.c['manual'])
 
-    def test_expired_cycle_is_not_revived(self):
+    def test_expired_cycle_does_not_block_obsolete_tp1_latch_recovery(self):
         self.tp1(legacy=True);self.c['branch_deadline_utc']=self.f.reader.now-1
-        self.assertFalse(self.p.controller._restore_paper_tp1_pause(self.p.controller.snapshot()))
-        self.assertTrue(self.c['manual']);self.assertNotEqual(self.c['manual_reason'],'TP1_OWN_ENTRY_SL_UNAVAILABLE')
+        self.assertTrue(self.p.controller._restore_paper_tp1_pause(self.p.controller.snapshot()))
+        self.assertFalse(self.c.get('manual'))
 
     def test_atomic_recovery_save_failure_keeps_persisted_latch(self):
         self.tp1(legacy=True)
