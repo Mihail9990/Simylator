@@ -18,9 +18,9 @@ p=Structure();p.feed((ROOT/'index.html').read_text());assert not p.stack
 inside=lambda key,ancestor:any(id==ancestor for _,id in p.nodes[key][2])
 for id in ('start','stop','resume','reset','logout','save-settings','refresh-settings','save-tp-grid','save-v3-settings','logs-refresh','logs-download','paper-save-cost','writeoff-recovery'):
     assert inside(id,'settings-page'),id
-for id in ('own-entry-sl','reverse-enable','reverse-disable','cancel-initial','v3-link-toggle','level-buttons'):
+for id in ('own-entry-sl','reverse-enable','reverse-disable','cancel-initial','v3-link-toggle','v3-cancel-entry','v3-cancel-request','paper-flatten','level-buttons'):
     assert inside(id,'drawer-content'),id
-for id in ('v3-submit-entry','v3-cancel-request','v3-cancel-entry','v3-sl-plus','v3-sl-minus'):
+for id in ('v3-sl-plus','v3-sl-minus'):
     assert inside(id,'v3-panels') and not inside(id,'drawer-content'),id
 assert not inside('bot-activity','chart-page') and not inside('bot-activity','settings-page')
 assert p.nodes['bot-activity'][1]['tabindex']=='0'
@@ -46,5 +46,8 @@ assert inside('activity-recovery','bot-activity') and inside('activity-total-net
 assert inside('v3-link-status','drawer-content') and not inside('v3-link-toggle','v3-entry-panel')
 
 for id in ('paper-controls','paper-history','paper-deals','state-heading','tickets','cycle-history-rows','writeoff-history'):assert id not in p.nodes,id
-for id in ('paper-resume','paper-flatten'):assert inside(id,'service-controls'),id
+for id in ('paper-resume',):assert inside(id,'service-controls'),id
 assert inside('paper-cost','paper-cost-settings')
+
+assert 'v3-entry-panel' not in p.nodes and 'v3-submit-entry' not in p.nodes
+for id in ('candle-settings-save','candle-resume','candle-trigger-1','candle-trigger-2','candle-offset-1'):assert inside(id,'settings-page')

@@ -99,3 +99,61 @@ class MarketReader:
         age=None if result['timestamp'] is None else self.clock()-result['timestamp']
         result.update(age_seconds=age,status='FRESH' if self.reason is None and age is not None and -2<=age<=5 else 'WAITING',reason=self.reason)
         return result
+
+
+class RawMarketReader(MarketReader):
+    """Observed broker coordinates. No UTC source, quote-age gate, or offset."""
+    market_time_mode='mt5_raw_v1'
+    def __init__(self,*args,**kwargs):
+        if kwargs.get('market_time_offset_seconds',0)!=0:
+            raise ValueError('Raw MT5 time requires zero offset; existing data must not be reinterpreted')
+        super().__init__(*args,**kwargs)
+        from .raw_market_time import RawMarketTime, MT5DisplayClock
+        self.raw_time=RawMarketTime(self.monotonic)
+        self.display_clock=MT5DisplayClock(self.monotonic)
+
+    def _read_verified(self,read_started=None):
+        # read_raw validates source identity and the price/OHLC values.
+        self.read_raw()
+        info=self._info(self.symbol);tick=self._tick(self.symbol);bars=self._bars(self.symbol,self.tf,0,120)
+        if info is None or not info.visible or tick is None or bars is None or len(bars)<2:
+            raise OSError('MT5_RAW_WAIT_DATA')
+        from .raw_market_time import closed_pair
+        closed,current=closed_pair(tick,bars[-2:])
+        stamp=self.raw_time.observe(tick)
+        self.display_clock.connection(True)
+        if self.display_clock.anchor is None:self.display_clock.align(tick)
+        spec=dict(symbol=self.symbol,currency='UST',profit_currency=str(info.currency_profit),calc_mode=str(info.trade_calc_mode),
+            contract_size=str(info.trade_contract_size),tick_size=str(info.trade_tick_size),tick_value_profit=str(info.trade_tick_value_profit),tick_value_loss=str(info.trade_tick_value_loss),
+            volume_min=str(info.volume_min),volume_step=str(info.volume_step),volume_max=str(info.volume_max),point=str(info.point),stops_level=str(info.trade_stops_level),freeze_level=str(info.trade_freeze_level))
+        Spec.load(spec)
+        candles=[]
+        for bar in bars:
+            t=market_timestamp_to_utc(bar['time'],0)
+            if t%60:raise ValueError('Invalid broker candle')
+            values={k:number(bar[k]) for k in ('open','high','low','close')}
+            if values['low']<=0 or not values['low']<=min(values['open'],values['close'])<=max(values['open'],values['close'])<=values['high']:
+                raise ValueError('Invalid OHLC')
+            candles.append(dict(utc_time=None,raw_time=t,broker_time=t,time_domain='BROKER_RAW',**{k:str(v) for k,v in values.items()}))
+        if any(a['raw_time']>=b['raw_time'] for a,b in zip(candles,candles[1:])):raise ValueError('Invalid broker candle ordering')
+        self.last=dict(source='MT5_READ_ONLY',symbol=self.symbol,timestamp_semantics='BROKER_RAW',status='OBSERVED',timestamp=stamp,tick_msc=int(tick.time_msc),
+            quote=dict(bid=str(number(tick.bid)),ask=str(number(tick.ask)),utc_time=None,broker_time=stamp),candles=candles,spec=spec,
+            candle=dict(id=int(closed['time']),open=str(number(closed['open'])),close=str(number(closed['close'])),closed=True,time_domain='BROKER_RAW',current_id=current))
+        self.reason=None
+        return deepcopy(self.last)
+
+    def read(self):
+        try:return self._read_verified()
+        except Exception:
+            self.reason='MT5_RAW_WAIT_DATA';self.raw_time.invalidate(disconnected=True);self.display_clock.connection(False)
+            raise
+
+    def align_time(self):
+        self.read_raw()
+        return self.display_clock.align(self._tick(self.symbol))
+
+    def view(self):
+        result=deepcopy(self.last or dict(source='MT5_READ_ONLY',symbol=self.symbol,quote={},candles=[],timestamp=None))
+        result.update(timestamp_semantics='BROKER_RAW',status='OBSERVED' if self.reason is None else 'WAITING',reason=self.reason,
+            age_seconds=None,time_domain='BROKER_RAW',time_status=self.raw_time.view(),display_clock=self.display_clock.view())
+        return result

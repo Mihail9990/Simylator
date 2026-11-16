@@ -11,6 +11,8 @@ vm.runInContext(src.slice(src.indexOf(' async function send('),src.indexOf(' asy
 const run=code=>vm.runInContext(code,ctx);
 const accept=(v,start=now)=>{ctx.view=v;ctx.sample=v;ctx.started=start;run('acceptSnapshotFreshness(sample,started)');};
 (async()=>{
+ const raw=fresh();raw.feed={status:'OBSERVED',timestamp_semantics:'BROKER_RAW',age_seconds:null};accept(raw);assert.equal(run('quoteCurrent()'),true,'observed raw broker time does not create false pause');
+ raw.feed.status='WAITING';accept(raw);assert.equal(run('quoteCurrent()'),false,'missing raw source is still not current');
  const q={available:true,bid:'100',ask:'101',timestamp:1804800000,age_seconds:600,stale:true,source:'LAST_VERIFIED_MT5'};
  const stale=()=>({...fresh(),feed:{status:'WAITING',timestamp_semantics:'UNVERIFIED',age_seconds:600},paper:{command_quote:{...q}}});
  accept(stale());assert.equal(run('quoteCurrent()'),false);assert.equal(run('paperServerReady'),true);

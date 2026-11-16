@@ -2,7 +2,7 @@
 from copy import deepcopy
 from decimal import Decimal as D
 import hashlib,json,uuid,time
-from .recovery_v3 import ControlledRecoveryController
+from .candle_recovery import CandleRecoveryController
 from .control import ActionRejected,ActionGateway,OwnerMailbox
 from .broker import Spec
 from .settings import number
@@ -51,7 +51,8 @@ class PaperExchange:
         self.p['deals'].append(dict(id='in-'+pid,position_id=pid,order_id=o['id'],command_id=o['command_id'],entry='IN',side=o['side'],volume=o['size'],price=str(price),reason='EXPERT',profit='0',commission=self._fee(o['size']),swap='0',fee='0',time=self.clock()))
         if self.command_quote is not None:self.p['deals'][-1]['paper_quote']=deepcopy(self.command_quote)
     def observe(self,market):
-        if market.get('timestamp_semantics')!='VERIFIED':
+        raw_mode=market.get('timestamp_semantics')=='BROKER_RAW'
+        if market.get('timestamp_semantics') not in {'VERIFIED','BROKER_RAW'}:
             self.available=False
             raise ValueError('Paper requires verified timestamp semantics')
         if market['symbol']!=self.symbol:raise ValueError('Wrong paper symbol')
@@ -59,15 +60,15 @@ class PaperExchange:
         bid,ask=number(market['quote']['bid']),number(market['quote']['ask'])
         if bid<=0 or ask<bid or number(market['timestamp'])<=0:
             raise ValueError('Invalid verified paper quote')
-        if self.p['cursor'] is not None and market['tick_msc']<self.p['cursor']:return
+        if not raw_mode and self.p['cursor'] is not None and market['tick_msc']<self.p['cursor']:return
         self.market=deepcopy(market)
-        self.available=market['status']=='FRESH' and -2<=self.clock()-market['timestamp']<=5
+        self.available=(market['status']=='OBSERVED' if raw_mode else market['status']=='FRESH' and -2<=self.clock()-market['timestamp']<=5)
         if not self.available:return
         self.p['last_verified_market']=deepcopy(market)
         stamp=market['tick_msc'];key=hashlib.sha256(json.dumps(market['quote'],sort_keys=True).encode()).hexdigest()
         previous=self.p['cursor']
-        if previous is not None and (stamp<previous or (stamp==previous and key in self.p['cursor_keys'])):return
-        if previous is not None and stamp-previous>5000 and (self.p['orders'] or self.p['positions']):self.p['paused_gap']=True
+        if previous is not None and ((not raw_mode and stamp<previous) or (stamp==previous and key in self.p['cursor_keys'])):return
+        if not raw_mode and previous is not None and stamp-previous>5000 and (self.p['orders'] or self.p['positions']):self.p['paused_gap']=True
         # First sample after restart is a baseline, never an inferred historical fill.
         baseline=self.boot;self.boot=False
         if previous!=stamp:self.p['cursor_keys']=[]
@@ -92,7 +93,7 @@ class PaperExchange:
             market=self.p['last_verified_market']
             return dict(account=self.account,hedging=True,history_complete=True,spec=deepcopy(market['spec']),now=self.clock(),quote=deepcopy(market['quote']),candle=deepcopy(market['candle']),
                 **{k:deepcopy(self.p[k]) for k in ('orders','positions','deals','order_history')})
-        if not self.available or self.market is None or not -2<=self.clock()-self.market['timestamp']<=5:raise OSError('Paper waits for verified fresh MT5 data')
+        if not self.available or self.market is None or (self.market.get('timestamp_semantics')!='BROKER_RAW' and not -2<=self.clock()-self.market['timestamp']<=5):raise OSError('Paper waits for verified fresh MT5 data')
         return dict(account=self.account,hedging=True,history_complete=True,spec=deepcopy(self.market['spec']),now=self.clock(),quote=deepcopy(self.market['quote']),candle=deepcopy(self.market['candle']),
             **{k:deepcopy(self.p[k]) for k in ('orders','positions','deals','order_history')})
     def result(self,cid):return deepcopy(self.p['results'].get(cid,{'status':'UNKNOWN'}))
@@ -151,7 +152,7 @@ class PaperSession:
             self.store.close()
             raise
         self.exchange=PaperExchange(self.store,clock=clock)
-        self.controller=ControlledRecoveryController(self.store,self.exchange,clock=clock,monotonic=monotonic)
+        self.controller=CandleRecoveryController(self.store,self.exchange,clock=clock,monotonic=monotonic)
         from .paper_interrupt import recover_receipts
         recover_receipts(self)
         from .paper_commands import PaperCommandMailbox
@@ -209,7 +210,9 @@ class PaperSession:
                 if cmd['status'] not in TERMINAL:cmd['status']='OBSOLETE'
             s.update(cycle=None,phase='WAIT_START',stop=True);self.controller.save('paper_manual_reset');return
         if a==dict(type='command',text='/resume_time'):
-            if self.reader.safety.check():raise ActionRejected('Ожидаются проверенные свежие данные MT5')
+            if getattr(self.reader,'market_time_mode',None)=='mt5_raw_v1':
+                self.reader.align_time()
+            elif self.reader.safety.check():raise ActionRejected('Ожидаются проверенные свежие данные MT5')
             return
         if self.exchange.p['paused_gap'] and a==dict(type='command',text='/stop'):
             self.controller.command('/stop')
@@ -231,7 +234,7 @@ class PaperSession:
         projection_age = self.mailbox._nonnegative(now-projection_started)
         quote_age = quote_age+projection_age if quote_age is not None and projection_age is not None else None
         feed['age_seconds'] = quote_age
-        if quote_age is None or not -2 <= quote_age <= 5:
+        if feed.get('timestamp_semantics')!='BROKER_RAW' and (quote_age is None or not -2 <= quote_age <= 5):
             feed['status'] = 'WAITING'
         return view
 

@@ -392,6 +392,9 @@ class Controller:
 
     @staticmethod
     def _fresh_closed_candle(snap):
+        bar=snap['candle']
+        if bar.get('time_domain')=='BROKER_RAW':
+            return bar.get('closed') is True and number(bar['id'])<number(bar['current_id'])
         return number(snap['candle']['id'])==int(number(snap['now'])//60)*60-60
 
     def status(self):

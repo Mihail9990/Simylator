@@ -44,14 +44,13 @@ class LastQuoteCommands(unittest.TestCase):
         self.assertEqual(r['status'],'APPLIED');self.assertFalse(self.p['orders']);self.assertEqual(self.bot.state['phase'],'INITIAL_WAIT')
         self.assertTrue(r['paper_quote']['stale']);before=deepcopy(self.p)
         self.assertEqual(self.session.mailbox.submit(req)['status'],'APPLIED');self.session.step();self.assertEqual(before,self.p)
-    def test_stale_market_uses_bid_ask_without_automatic_ticks(self):
-        self.initial();self.reader.tick('3998','3998.1');self.session.step();self.session.step()
-        self.assertEqual(self.bot.state['phase'],'V3_WAIT_ENTRY');self.stale()
-        with patch.object(self.bot,'tick',side_effect=AssertionError('autonomous tick')),patch.object(self.bot,'_follow',side_effect=AssertionError('follow')):
+    def test_removed_manual_entry_is_rejected_even_with_last_quote(self):
+        self.initial();self.stale()
+        before=deepcopy(self.p['positions'])
+        with patch.object(self.bot,'tick',side_effect=AssertionError('autonomous tick')):
             req,r=self.submit(dict(type='v3_entry',cycle_id=self.bot.state['cycle']['id'],order_type='MARKET',timing='now',side='BUY'))
-        self.assertEqual(r['status'],'APPLIED');self.assertEqual({D(p['entry']) for p in self.p['positions']},{D('3998.1')})
-        self.assertTrue(all(d['paper_quote']['stale'] for d in self.p['deals'] if d['entry']=='IN' and d['price']=='3998.1'))
-        before=deepcopy(self.p);self.session.step();self.assertEqual(before,self.p)
+        self.assertEqual(r['status'],'REJECTED')
+        self.assertEqual(before,self.p['positions'])
     def test_flatten_on_stale_bid_not_ask_and_no_replay(self):
         self.initial();self.stale();_,r=self.submit(dict(type='paper_flatten',confirmed=True))
         self.assertEqual(r['status'],'APPLIED');self.assertFalse(self.p['positions'])

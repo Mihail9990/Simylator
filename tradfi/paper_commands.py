@@ -25,15 +25,16 @@ def quote_info(exchange):
     market = exchange.p.get('last_verified_market')
     unavailable = dict(available=False, source='LAST_VERIFIED_MT5')
     try:
-        if not market or market['timestamp_semantics'] != 'VERIFIED':return unavailable
+        if not market or market['timestamp_semantics'] not in {'VERIFIED','BROKER_RAW'}:return unavailable
         bid, ask = number(market['quote']['bid']), number(market['quote']['ask'])
-        stamp = number(market['timestamp']);age = number(exchange.clock())-stamp
+        stamp = number(market['timestamp']);raw_mode=market['timestamp_semantics']=='BROKER_RAW'
+        age = 0 if raw_mode else number(exchange.clock())-stamp
         if bid <= 0 or ask < bid or stamp <= 0 or age < -2:return unavailable
         from .broker import Spec
         Spec.load(market['spec'])
         if market['symbol'] != exchange.symbol:return unavailable
-        return dict(available=True, source='LAST_VERIFIED_MT5', bid=str(bid), ask=str(ask),
-                    timestamp=float(stamp), age_seconds=float(age), stale=bool(age > 5 or not exchange.available))
+        return dict(available=True, source='LAST_OBSERVED_MT5' if raw_mode else 'LAST_VERIFIED_MT5', bid=str(bid), ask=str(ask),
+                    timestamp=float(stamp), timestamp_semantics=market['timestamp_semantics'], age_seconds=None if raw_mode else float(age), stale=bool(not exchange.available or (not raw_mode and age > 5)))
     except (ValueError, KeyError, TypeError, ArithmeticError):
         return unavailable
 

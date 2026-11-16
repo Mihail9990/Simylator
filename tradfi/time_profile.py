@@ -97,3 +97,8 @@ def market_tick_to_utc(tick, offset_seconds=0):
     if not 0 <= stamp - seconds < 1:
         raise TimeProfileError('TICK_SECONDS_MILLISECONDS_DISAGREE')
     return market_timestamp_to_utc(stamp, offset_seconds)
+
+
+def market_tick_raw_seconds(tick):
+    """Validate the MT5 coordinate without claiming it is UTC."""
+    return market_tick_to_utc(tick, 0)

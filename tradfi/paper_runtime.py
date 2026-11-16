@@ -8,7 +8,7 @@ from pathlib import Path
 import time
 
 from .owner_lock import owner_lock
-from .paper_market import MarketReader
+from .paper_market import RawMarketReader
 from .paper import PaperSession
 from .time_profile import validate_market_time_offset
 
@@ -24,7 +24,10 @@ def paper_state_path(config):
 def _run_paper(config, *, api=None, stop_event=None, clock=time.time,
                monotonic=time.monotonic, panel_factory=None, reader_factory=None):
     config = dict(config)
+    if config.get('market_time_mode','mt5_raw_v1') != 'mt5_raw_v1':
+        raise ValueError('Independent PAPER runtime requires mt5_raw_v1 time mode')
     market_offset = validate_market_time_offset(config)
+    if market_offset != 0:raise ValueError('Remove legacy time offset only after checking the database time binding; no automatic timestamp migration')
     if config.get('backend', 'paper_mt5_quotes_v1') != 'paper_mt5_quotes_v1':
         raise ValueError('Independent paper backend config is required')
     if config.get('enable_trading', False) is not False:
@@ -61,7 +64,7 @@ def _run_paper(config, *, api=None, stop_event=None, clock=time.time,
         api=api if api is not None else importlib.import_module('MetaTrader5')
         resources.callback(api.shutdown)
         if not api.initialize(path,timeout=10000):raise OSError('MT5 initialize failed')
-        reader=(reader_factory or MarketReader)(api,symbol=config['symbol'],clock=clock,monotonic=monotonic,
+        reader=(reader_factory or RawMarketReader)(api,symbol=config['symbol'],clock=clock,monotonic=monotonic,
             expected_account=str(login)+'@'+config['expected_server'],market_time_offset_seconds=market_offset)
         paper=PaperSession(state,reader,clock=clock,monotonic=monotonic)
         paper.log_file=log_path

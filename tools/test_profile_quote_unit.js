@@ -23,7 +23,7 @@ const profile={id:'saved',name:'Saved profile',stages:[{volume:'0.02',tp_distanc
 const state={scope:'fixture',recovery_profiles:{profiles:[profile],selected_profile_id:'saved'}};
 let accept=true,reloads=0;const dialogs=[];
 const ctx=vm.createContext({$,view:state,document:{createElement:tag=>new Element(tag),createElementNS:(_,tag)=>new Element(tag)},confirm:message=>{dialogs.push(message);return accept;},send:()=>assert.fail('presentation must not send an action'),error:()=>{},fields:()=>{reloads++;}});
-vm.runInContext(source.slice(source.indexOf(' // Profile editor keeps'),source.indexOf(' function v3InputMode()')),ctx);
+vm.runInContext(source.slice(source.indexOf(' // Profile editor keeps'),source.indexOf(' function v3FillSettings()')),ctx);
 vm.runInContext('loadProfileDraft(view.recovery_profiles.profiles[0])',ctx);
 $('recovery-profile-select').value='saved';
 $('recovery-profile-new').onclick();
@@ -55,7 +55,7 @@ vm.runInContext(source.split('\n').find(line=>line.includes("$('refresh-settings
 accept=false;$('refresh-settings').onclick();assert.equal(reloads,0,'refresh cannot silently discard the draft');
 accept=true;$('refresh-settings').onclick();assert.equal(reloads,1);
 // Draw actual SVG nodes over narrow/wide panes, candle counts and zoom levels.
-Object.assign(ctx,{svg:$('chart'),ns:'svg',lines:[],zoom:1,pan:0,timeOffset:0,visibleCount:60,frameHeight:520,plotBottom:480,plotHeight:450,plotRight:855,innerWidth:1280,preview:null,previewFocus:null,previewWasOpen:false,prefs:{colors:{}},drawAnalysis:()=>{},utcLabel:()=>'',feedUtcVerified:()=>true});
+Object.assign(ctx,{svg:$('chart'),ns:'svg',lines:[],zoom:1,pan:0,timeOffset:0,visibleCount:60,frameHeight:520,plotBottom:480,plotHeight:450,plotRight:855,innerWidth:1280,preview:null,previewFocus:null,previewWasOpen:false,prefs:{colors:{}},drawAnalysis:()=>{},utcLabel:()=>'',marketLabel:()=>'',candleTime:c=>c?.raw_time??c?.utc_time,feedUtcVerified:()=>true});
 vm.runInContext(source.slice(source.indexOf(' function node('),source.indexOf(' function openPreview(')),ctx);
 let cases=0;
 for(const width of [220,320,390,680,1280])for(const height of [120,520])for(const count of [1,10,60,240])for(const zoom of [1,2])for(const base of [4000,100000]){
@@ -86,3 +86,11 @@ ctx.pan=0;vm.runInContext('draw()',ctx);const offset=ctx.timeOffset;
 handlers.pointerdown(event(600,60));handlers.pointermove(event(650,60));handlers.pointerup(event(650,60));
 assert(Math.abs(ctx.timeOffset-offset-100/ctx.plotRight*ctx.visibleCount)<1e-8,'horizontal delta uses SVG pixels after letterboxing');
 console.log(`PASS profile open/focus, repeated clicks, dirty-draft cancel/replace/refresh; ${cases} actual-source chart gutter cases and letterboxed pointer navigation. DOM doubles, not browser rendering.`);
+
+// BROKER_RAW shows broker coordinates, not the obsolete hidden-label warning.
+ctx.view.feed.timestamp_semantics='BROKER_RAW';ctx.feedUtcVerified=()=>false;ctx.marketLabel=()=> '12:00';
+vm.runInContext('draw()',ctx);
+assert(ctx.svg.children.some(n=>n.tag==='title'&&n.textContent.includes('Метки времени брокера')));
+assert(!ctx.svg.children.some(n=>n.tag==='title'&&n.textContent.includes('метки скрыты')));
+ctx.view.feed.timestamp_semantics='UNVERIFIED';vm.runInContext('draw()',ctx);
+assert(ctx.svg.children.some(n=>n.tag==='title'&&n.textContent.includes('метки скрыты')));

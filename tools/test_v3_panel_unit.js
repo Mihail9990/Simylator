@@ -12,7 +12,7 @@ for(const role of ['live','paper']){
  assert.throws(()=>vm.runInContext("mode='other'",c));
 }
 assert(html.includes('id="v3-sl-confirm"'),'SL has explicit commit control');
-assert(html.includes('class="entry-details"'),'order explanations remain accessible in details');
+assert(!html.includes('id="v3-entry-panel"'),'manual order panel removed');
 assert(html.includes('aria-label="Расстояние SL от входа"'));
 const compactCss=fs.readFileSync(path.join(root,'panel.css'),'utf8');
 assert(compactCss.includes('position:absolute;top:auto;bottom:60px'),'drawers anchor at chart bottom');
@@ -34,15 +34,37 @@ class Element{
 }
 const elements=Object.fromEntries(ids.map(id=>[id,new Element()]));
 const $=id=>{assert(elements[id],'known element '+id);return elements[id];};
-Object.assign($('v3-order-type'),{value:'STOP'});$('v3-timing').value='current';$('v3-side').value='BUY';
 const base={paper:{command_quote:{available:true,bid:'100',ask:'101',timestamp:1804800000,age_seconds:0,stale:false,source:'LAST_VERIFIED_MT5'}},feed:{status:'FRESH',timestamp_semantics:'VERIFIED',age_seconds:0},recovery_mode:'V3',cycle_id:'c1',scope:'PAPER-fixture',revision:7,read_only:false,positions:[{id:'p1'}],orders:[],v3_sl_distance:'1.50',v3_settings:{entry_distance:'1.00',count_presets:[4,6,10]},v3_controls:{can_enter:true,can_link:true,can_cancel_link:false,can_adjust_sl:true,reason:''}};
 const profile={id:'six',name:'Six',stages:Array.from({length:6},(_,i)=>({volume:'0.01',tp_distance:String((i+1)*.25)})),total_volume:'0.06',sl_distance:'1.50'};
-base.recovery_profiles={selected_profile_id:'six',profiles:[profile,{id:'mix',name:'Mix',stages:[{volume:'0.05',tp_distance:'0.25'},{volume:'0.02',tp_distance:'0.50'},{volume:'0.01',tp_distance:'0.75'}]}],recovery_sl_distance:'1.50'};base.selected_recovery_profile=profile;base.current_recovery_profiles=[{...profile,group_id:'g1'}];
+base.recovery_profiles={selected_profile_id:'six',profiles:[profile,{id:'mix',name:'Mix',stages:[{volume:'0.05',tp_distance:'0.25'},{volume:'0.02',tp_distance:'0.50'},{volume:'0.01',tp_distance:'0.75'}]}],recovery_sl_distance:'1.50'};base.selected_recovery_profile=profile;base.candle_recovery={settings:{trigger_1:'0.25',trigger_2:'0.40',offset_1:'0.25'},volume:'0.06',manual_required:true};base.current_recovery_profiles=[{...profile,group_id:'g1'}];
 const actions=[],dialogs=[],errors=[],store=new Map();let accept=true;
 const ctx=vm.createContext({$,friendlyReason:x=>x??'',document:{createElement:()=>new Element()},performance:{now:()=>0},view:structuredClone(base),busy:false,pending:null,mode:'paper',confirm:msg=>{dialogs.push(msg);return accept;},send:async(a,r,s)=>actions.push({a,r,s}),error:m=>errors.push(m),localStorage:{getItem:k=>store.get(k),setItem:(k,v)=>store.set(k,v)},fields:()=>{},console});
 const part=src.slice(src.indexOf(' // V3 reuses scoped receipts'),src.indexOf(' function fields(){'));
 vm.runInContext(part,ctx);vm.runInContext('paperServerReady=true;v3Fresh=true;snapshotDeadline=2000;quoteDeadline=5000;v3FillSettings();v3Render()',ctx);
 async function main(){
+ // Broker clock labels are not UTC and last observed prices do not require wall-clock age.
+ ctx.view.feed.timestamp_semantics='BROKER_RAW';ctx.view.feed.status='OBSERVED';
+ ctx.view.paper.command_quote={available:true,source:'LAST_OBSERVED_MT5',bid:'100',ask:'101',timestamp:1804800000,age_seconds:null};
+ assert(vm.runInContext('paperQuoteAvailable()',ctx));assert(vm.runInContext('paperQuoteText()',ctx).includes('время брокера'));assert(!vm.runInContext('paperQuoteText()',ctx).includes('UTC'));
+ assert.equal(vm.runInContext('utcLabel(1804800000)',ctx),'');assert(vm.runInContext('marketLabel(1804800000)',ctx).includes('время брокера'));
+ ctx.view=structuredClone(base);
+ // Close-all is a PAPER controller action, not legacy flatten/manual order entry.
+ vm.runInContext(src.split('\n').find(line=>line.includes("$('paper-flatten').onclick=")),ctx);
+ let closedBefore=actions.length;accept=false;await $('paper-flatten').onclick();assert.equal(actions.length,closedBefore);accept=true;
+ await $('paper-flatten').onclick();assert.equal(actions.at(-1).a.type,'candle_close_all');assert.equal(actions.at(-1).a.cycle_id,'c1');
+ closedBefore=actions.length;ctx.view.positions=[];await $('paper-flatten').onclick();assert.equal(actions.length,closedBefore);ctx.view=structuredClone(base);
+ // Current candle-follow settings and deliberate manual resume use real handlers.
+ assert(!elements['v3-submit-entry']&&!elements['v3-order-type']);
+ assert.equal($('candle-trigger-1').value,'0.25');assert.equal($('candle-trigger-2').value,'0.40');
+ let n=actions.length;accept=false;await $('candle-settings-save').onclick();assert.equal(actions.length,n);accept=true;
+ await $('candle-settings-save').onclick();assert.deepEqual(JSON.parse(JSON.stringify(actions.at(-1).a)),{type:'candle_recovery_settings',cycle_id:'c1',trigger_1:'0.25',trigger_2:'0.40',offset_1:'0.25'});
+ $('candle-trigger-2').value='0.10';n=actions.length;await $('candle-settings-save').onclick();assert.equal(actions.length,n);$('candle-trigger-2').value='0.40';
+ $('candle-resume-volume').value='0.03';n=actions.length;await $('candle-resume').onclick();assert.equal(actions.length,n,'mismatching profile volume blocked');
+ $('candle-resume-volume').value='0.06';accept=false;await $('candle-resume').onclick();assert.equal(actions.length,n);accept=true;
+ await $('candle-resume').onclick();assert.equal(actions.at(-1).a.type,'candle_recovery_resume');assert.equal(actions.at(-1).a.volume,'0.06');assert.equal(actions.at(-1).a.profile_id,'six');
+ ctx.pending='pending';n=actions.length;await $('candle-resume').onclick();assert.equal(actions.length,n,'no repeat while request pending');ctx.pending=null;
+ ctx.view.candle_recovery.manual_required=false;await $('candle-resume').onclick();assert.equal(actions.length,n,'no resume while auto running');ctx.view.candle_recovery.manual_required=true;
+
  // Execute actual chart rendering with verified, unverified and missing semantics.
  ctx.svg=$('chart');ctx.ns='http://www.w3.org/2000/svg';ctx.document.createElementNS=()=>new Element();
  Object.assign(ctx,{lines:[],zoom:1,pan:0,timeOffset:0,visibleCount:60,frameHeight:520,plotBottom:480,plotHeight:450,innerWidth:1000,preview:null,previewFocus:null,previewWasOpen:false,prefs:{colors:{}},drawAnalysis:()=>{}});
@@ -60,9 +82,7 @@ async function main(){
   assert.equal(vm.runInContext('utcLabel(view.feed.timestamp)',ctx),'');
  }
  ctx.view.v3_request={bar_id:stamp,order_type:'STOP',count:6};vm.runInContext('v3Render()',ctx);
- assert(!$('v3-request-status').textContent.includes('UTC'));
  ctx.view.feed.timestamp_semantics='VERIFIED';vm.runInContext('v3Render()',ctx);
- assert($('v3-request-status').textContent.includes('UTC'));
  for(const timestamp of [null,undefined,'','not a timestamp',1e30])assert.equal(vm.runInContext('utcLabel('+JSON.stringify(timestamp)+')',ctx),'');
  // Latest diagnostic is presentation-only; the original latch still blocks controls.
  ctx.view=structuredClone(base);ctx.view.time_block={reason:'MT5_UTC_WAIT_REFERENCE'};
@@ -75,13 +95,13 @@ async function main(){
  assert(!$('safety').textContent.includes('WAIT_REFERENCE'));
  assert($('safety').textContent.includes('Блокировка сохранена'));
  assert($('safety').textContent.includes('Проверить время'));
- assert.equal($('v3-submit-entry').disabled,true);
+ assert.equal($('candle-settings-save').disabled,true);
  assert.equal(ctx.view.time_block.reason,'MT5_UTC_WAIT_REFERENCE');
  delete ctx.view.time_status;assert(vm.runInContext('timeSafetyText()',ctx).includes('MT5_UTC_WAIT_REFERENCE'),'legacy snapshot fallback');
  ctx.view.time_status={latched_reason:'MT5_UTC_WAIT_REFERENCE',current_reason:null};
  vm.runInContext(safetyLine+'\nv3Render()',ctx);
  assert.equal($('safety').textContent,'');
- $('safety').textContent=vm.runInContext('timeSafetyText()',ctx);assert.equal($('v3-submit-entry').disabled,true,'null current reason cannot clear latch');
+ $('safety').textContent=vm.runInContext('timeSafetyText()',ctx);assert.equal($('candle-settings-save').disabled,true,'null current reason cannot clear latch');
  ctx.view.time_block=null;vm.runInContext(safetyLine,ctx);assert.equal($('safety').textContent,'','presentation status cannot establish latch');
  ctx.view=structuredClone(base);vm.runInContext('v3Render()',ctx);
  // Execute the actual existing-button render assignment, retaining all legacy guards.
@@ -98,13 +118,9 @@ async function main(){
  ctx.view.recovery_mode='V1';renderOwn();assert.equal($('own-entry-sl').disabled,true,'V1 pending behavior unchanged');
  ctx.view.orders=[];renderOwn();assert.equal($('own-entry-sl').disabled,true,'legacy state never permits V3 actions');
  ctx.view=structuredClone(base);
- assert.equal($('v3-panels').hidden,false);assert(!elements['manual-close-controls']);assert.equal($('v3-side').disabled,true);assert.equal($('recovery-profile-select').children.length,2);
+ assert.equal($('v3-panels').hidden,false);assert(!elements['manual-close-controls']);assert.equal($('recovery-profile-select').children.length,2);
  let before=actions.length;
- $('v3-order-type').value='MARKET';$('v3-timing').value='now';$('v3-side').value='SELL';$('v3-timing').onchange();assert.equal($('v3-side').disabled,false);
- accept=false;await $('v3-submit-entry').onclick();assert.equal(actions.length,before);accept=true;
- await $('v3-submit-entry').onclick();assert(!('count' in actions.at(-1).a));assert.equal(actions.at(-1).a.side,'SELL');assert.equal(actions.at(-1).a.timing,'now');assert.equal(actions.at(-1).r,7);assert.equal(actions.at(-1).s,'PAPER-fixture');
- $('v3-order-type').value='STOP';$('v3-order-type').onchange();assert.equal($('v3-timing').value,'current');assert.equal($('v3-side').disabled,true);
- $('v3-timing').value='next';const stopDialogs=dialogs.length;accept=false;await $('v3-submit-entry').onclick();assert.equal(actions.at(-1).a.order_type,'STOP');assert.equal(actions.at(-1).a.timing,'next');assert.equal(dialogs.length,stopDialogs);accept=true;
+ const stopDialogs=dialogs.length;
  ctx.view.v3_controls.can_cancel_entry=true;vm.runInContext('v3Render()',ctx);await $('v3-cancel-entry').onclick();assert.equal(actions.at(-1).a.type,'v3_cancel_entry');assert.equal(dialogs.length,stopDialogs);
  const slBefore=actions.length;
  await $('v3-sl-minus').onclick();assert.equal(actions.length,slBefore,'minus only stages');assert.equal($('v3-sl-value').textContent,'1.40');await $('v3-sl-confirm').onclick();assert.equal(actions.at(-1).a.distance,'1.40');
@@ -142,16 +158,15 @@ async function main(){
  ctx.view=structuredClone(base);vm.runInContext('v3Render()',ctx);assert($('recovery-current-summary').textContent.includes('g1'));assert($('recovery-current-summary').textContent.includes('0.06'));
  for(const block of ['busy','pending','read_only','stale']){
   ctx.busy=block==='busy';ctx.pending=block==='pending'?'req':null;ctx.view.read_only=block==='read_only';vm.runInContext('paperServerReady='+String(block!=='stale')+';v3Fresh='+String(block!=='stale')+';v3Render()',ctx);
-  before=actions.length;await $('v3-link-toggle').onclick();await $('v3-submit-entry').onclick();await $('v3-sl-plus').onclick();await $('v3-sl-confirm').onclick();await $('recovery-profile-apply').onclick();await $('recovery-profile-save').onclick();await $('recovery-save-sl').onclick();assert.equal(actions.length,before,block);assert.equal($('v3-link-toggle').disabled,true);
+  before=actions.length;await $('v3-link-toggle').onclick();await $('candle-settings-save').onclick();await $('v3-sl-plus').onclick();await $('v3-sl-confirm').onclick();await $('recovery-profile-apply').onclick();await $('recovery-profile-save').onclick();await $('recovery-save-sl').onclick();assert.equal(actions.length,before,block);assert.equal($('v3-link-toggle').disabled,true);
  }
  ctx.busy=false;ctx.pending=null;ctx.view.read_only=false;vm.runInContext('paperServerReady=true;v3Fresh=true',ctx);
  vm.runInContext('paperServerReady=true;v3Fresh=false;v3Render()',ctx);
- assert.equal($('v3-submit-entry').disabled,false,'PAPER server-fresh state remains actionable despite client delay');
- assert($('v3-control-reason').textContent.includes('проверяется сервером'));
+ assert.equal($('candle-settings-save').disabled,false,'PAPER server-fresh state remains actionable despite client delay');
  vm.runInContext('v3Fresh=true',ctx);
  ctx.view.recovery_mode='V1';ctx.view.migration_block='Legacy active cycle needs reconciliation';vm.runInContext('v3Render()',ctx);
- assert.equal($('v3-panels').hidden,false,'V3 remains the only panel even for blocked legacy state');assert.equal($('v3-submit-entry').disabled,true);
- before=actions.length;await $('v3-submit-entry').onclick();await $('save-v3-settings').onclick();assert.equal(actions.length,before);
+ assert.equal($('v3-panels').hidden,false,'V3 remains the only panel even for blocked legacy state');assert.equal($('candle-settings-save').disabled,true);
+ before=actions.length;await $('candle-settings-save').onclick();await $('save-v3-settings').onclick();assert.equal(actions.length,before);
  assert(!elements['recovery-mode']);assert(!elements['save-recovery-mode']);assert(!elements['manual-close-submit']);
  assert(!src.includes("type:'recovery_mode'"));assert(!src.includes("type:'manual_close'"));
  assert(!html.includes('value="V1"'));assert(!html.includes('V3.3'));
@@ -167,7 +182,6 @@ async function main(){
  assert.equal(actions.at(-1).a.settings.EXPANSION_DISTANCE,'2');assert.equal(actions.at(-1).a.settings.TICKET_SIZE,'0.03');
  assert.equal(actions.at(-1).a.settings.INITIAL_SIZE,'0.02');assert.equal(actions.at(-1).a.settings.BASKET_COUNT,6);
  assert(!dialogs.at(-1).includes('EXPANSION_DISTANCE'));assert(!dialogs.at(-1).includes('TICKET_SIZE'));
- $('toggle-sl-panel').onclick();$('toggle-entry-panel').onclick();assert.equal($('v3-sl-panel').dataset.open,'true');assert.equal($('v3-entry-panel').dataset.open,'true');$('close-sl-panel').onclick();assert.equal($('v3-sl-panel').inert,true);assert.equal($('v3-entry-panel').dataset.open,'true');$('toggle-sl-panel').onclick();assert(Number($('v3-sl-panel').style.zIndex)>Number($('v3-entry-panel').style.zIndex),'reopened drawer is on top');
  // Actual viewport, quote rendering and navigation code; no action requests allowed.
  ctx.view={...structuredClone(chartView),feed:{...chartView.feed,timestamp_semantics:'VERIFIED',quote:{bid:'1.50',ask:'1.55'},candles:Array.from({length:180},(_,i)=>({utc_time:stamp+i*60,open:1,close:2,low:1,high:2}))}};
  ctx.visibleCount=60;ctx.timeOffset=0;vm.runInContext('draw()',ctx);
@@ -204,7 +218,7 @@ async function main(){
  ctx.view=structuredClone(base);ctx.view.paper.command_quote={available:false};ctx.view.feed.status='WAITING';ctx.view.v3_request={order_type:'STOP'};ctx.view.v3_link={};ctx.view.v3_controls.can_cancel_link=true;ctx.view.v3_controls.can_cancel_entry=true;
  vm.runInContext('paperServerReady=true;v3Render()',ctx);
  for(const id of ['v3-cancel-request','v3-cancel-entry','v3-link-toggle'])assert.equal($(id).disabled,false,id);
- for(const id of ['v3-submit-entry','v3-sl-plus'])assert.equal($(id).disabled,true,id);
+ for(const id of ['candle-settings-save','v3-sl-plus'])assert.equal($(id).disabled,true,id);
  for(const id of ['v3-cancel-request','v3-cancel-entry','v3-link-toggle']){await $(id).onclick();assert(actions.at(-1).a.type.startsWith('v3_cancel'));}
  ctx.pending='unknown';vm.runInContext('v3Render()',ctx);assert($('v3-cancel-entry').disabled);ctx.pending=null;
  vm.runInContext('paperServerReady=false;v3Render()',ctx);assert($('v3-cancel-entry').disabled);

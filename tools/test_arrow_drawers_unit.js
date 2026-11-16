@@ -19,9 +19,9 @@ const open=name=>$('v3-'+name+'-panel').dataset.open==='true';
 const click=(name,detail=1)=>$('toggle-'+name+'-panel').onclick({detail,preventDefault(){}});
 const drag=(name,dx,dy=0,end='pointerup')=>{const id=++pointer;fire(name,'pointerdown',event(id));fire(name,'pointermove',event(id,dx,dy));fire(name,end,event(id,dx,dy));};
 click('sl');assert(open('sl'));assert.equal($('toggle-sl-panel').textContent,'<');
-click('entry');assert(open('sl')&&open('entry'));click('sl');assert(!open('sl')&&open('entry'));
+click('sl');assert(!open('sl'));
 drag('sl',120);assert(open('sl'));assert.equal($('v3-sl-panel').style.transform,'');click('sl');assert(open('sl'),'release click must not undo drag');
-drag('sl',-100);assert(!open('sl'));click('sl');assert(!open('sl'));assert(open('entry'));
+drag('sl',-100);assert(!open('sl'));click('sl');assert(!open('sl'));
 for(const [dx,dy] of [[20,0],[-100,0],[5,80],[40,90]]){drag('sl',dx,dy);click('sl');assert(!open('sl'),'short, vertical or outward drag cannot open');}
 drag('sl',120,0,'pointercancel');click('sl');assert(!open('sl'));assert.equal($('v3-sl-panel').style.transform,'');
 drag('sl',120,0,'lostpointercapture');click('sl');assert(!open('sl'));
@@ -39,5 +39,5 @@ assert(src.includes('if(open&&!previewWasOpen){cancelSidePanelDrags();'));
 assert(src.split('\n').find(line=>line.includes('function setTab(tab)')).includes('cancelSidePanelDrags();'));
 const link=html.indexOf('id="v3-link-toggle"'),commands=html.indexOf('id="command-drawer"'),entry=html.indexOf('id="v3-entry-panel"');
 assert(link>commands&&commands>entry);assert(link<html.indexOf('id="preview-backdrop"'));assert.equal((html.match(/id="v3-link-toggle"/g)||[]).length,1);
-assert(html.includes('aria-label="Открыть контроль SL"'));assert(html.includes('aria-label="Открыть выставление ордеров"'));
+assert(html.includes('aria-label="Открыть контроль SL"'));assert(!html.includes('id="v3-entry-panel"'));
 console.log('PASS arrow taps/keyboard, directional drags, thresholds, cancellation, lost capture, secondary pointer, interruption, independent drawers, zero trade calls and SL trigger in Commands');

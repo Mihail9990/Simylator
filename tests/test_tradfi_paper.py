@@ -30,12 +30,12 @@ class PaperTest(unittest.TestCase):
         self.session.controller.state['tp_distances']=['.20']+[None]*19;self.session.controller.state['basket_settings']['INITIAL_SIZE']='.01';self.session.controller.save('fixture')
     def create(self):
         # Retain historical V1 paper coverage with an explicit test-only fixture.
-        # Production PaperSession always instantiates the primary V3 controller.
+        # Production PaperSession uses CandleRecoveryController; this fixture tests legacy compatibility only.
         from unittest.mock import patch
         from tradfi.basket_latest_close import LatestCloseBasketController
         from tradfi.recovery_v3 import ControlledRecoveryController
         cls=ControlledRecoveryController if getattr(self,'primary_v3',False) else LatestCloseBasketController
-        with patch('tradfi.paper.ControlledRecoveryController',cls):
+        with patch('tradfi.paper.CandleRecoveryController',cls):
             self.session=PaperSession(self.path,self.reader,clock=lambda:self.reader.now,monotonic=lambda:self.reader.now)
 
     def tearDown(self):self.session.close()

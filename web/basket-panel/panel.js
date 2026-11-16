@@ -48,7 +48,7 @@
  function commandContext(v){
   // Exclude moving quotes/PnL, but preserve every decision/settings/obligation
   // shown before confirmation. Never silently rebase the confirmed revision.
-  const keys=['scope','revision','command_context_token','cycle_id','phase','stopped','settings','active_settings','tp_distances','recovery_mode','v3_settings','recovery_profiles','selected_recovery_profile','v3_request','v3_link','manual_reason','migration_block','time_block','read_only'];
+  const keys=['scope','revision','command_context_token','cycle_id','phase','stopped','settings','active_settings','tp_distances','recovery_mode','v3_settings','candle_recovery','recovery_profiles','selected_recovery_profile','v3_request','v3_link','manual_reason','migration_block','time_block','read_only'];
   const stable=x=>Array.isArray(x)?x.map(stable):x&&typeof x==='object'?Object.fromEntries(Object.keys(x).sort().map(k=>[k,stable(x[k])])):x;
   return JSON.stringify(stable(Object.fromEntries([...keys.map(k=>[k,v?.[k]]),...['positions','orders'].map(k=>[k,(v?.[k]??[]).map(x=>({id:x.id,side:x.side,volume:x.volume,size:x.size,entry:x.entry,price:x.price,status:x.status,command_id:x.command_id,sl:x.sl,tp:x.tp})).sort((a,b)=>String(a.id).localeCompare(String(b.id)))])])));
  }
@@ -84,7 +84,7 @@
  $('reverse-enable').onclick=()=>reverseLadder(true);$('reverse-disable').onclick=()=>reverseLadder(false);
  $('start').onclick=()=>command('/start','Запустить следование закрытым M1 и восстановление корзинами?');
  $('stop').onclick=()=>command('/stop','Остановить новые входы и отменить ожидающие ордера? Открытые билеты сохраняют SL/TP. Долг не списывается.');
- $('resume').onclick=()=>command('/resume_time','Запросить свежую проверку времени? Другие блокировки не снимаются.');
+ $('resume').onclick=()=>command('/resume_time','Сверить отображаемое время с последним тиком MT5? Время VPS не используется для вычета смещения.');
  $('reset').onclick=()=>command('/reset_manual','Подтвердить ручную сверку всех ордеров и билетов? Требуются доказанное закрытие и отсутствие неопределённости. Долг сохраняется.');
  $('login-button').onclick=async()=>{const password=$('password').value;$('password').value='';try{const r=await fetch('/api/login',{method:'POST',headers:{...headers(),'Content-Type':'application/json'},body:JSON.stringify({password}),signal:AbortSignal.timeout(3000)});if(!r.ok)throw Error('Вход отклонён');$('login-error').textContent='';await poll();}catch(e){$('login-error').textContent=e.message;}};
  $('logout').onclick=async()=>{await fetch('/api/logout',{method:'POST',headers:{...headers(),'Content-Type':'application/json'},body:'{}'});location.reload();};
@@ -110,7 +110,7 @@
   let detail=phases[view.phase]??('Состояние контроллера: '+(view.phase??'не указано'));
   const safetyBlocked=!dataAvailable||view.manual_reason||view.migration_block||view.time_block||['MANUAL','SAFE_PAUSE','MIGRATION_BLOCK'].includes(view.phase);
   if(!safetyBlocked){if(view.positions?.length)detail='Ожидаю исполнения TP или SL';else if(view.orders?.length)detail='Ожидаю исполнения триггер ордера';}
-  else if(view.manual_reason||view.migration_block||view.time_block||!feedUtcVerified()||['MANUAL','SAFE_PAUSE','MIGRATION_BLOCK'].includes(view.phase))detail='Действия приостановлены: требуется проверка';
+  else if(view.manual_reason||view.migration_block||view.time_block||(!feedUtcVerified()&&view?.feed?.timestamp_semantics!=='BROKER_RAW')||['MANUAL','SAFE_PAUSE','MIGRATION_BLOCK'].includes(view.phase))detail='Действия приостановлены: требуется проверка';
   else detail=mode==='paper'&&paperServerReady?'Ожидание обновления; команды проверяет сервер':'Команды недоступны: ожидание данных';
   if(busy||pending)detail='Ожидаю подтверждения команды; повтор недоступен';
   if(view.v3_request)detail+=' · Запланирован '+view.v3_request.order_type+' по закрытию выбранной свечи';
@@ -130,6 +130,9 @@
  }
  // V3 reuses scoped receipts and snapshot revisions; no live execution is enabled here.
  // Display-only helpers: timestamp labels never establish a trading time contract.
+ const brokerTime=()=>view?.feed?.timestamp_semantics==='BROKER_RAW';
+ function marketLabel(timestamp,short=false){if(!brokerTime())return utcLabel(timestamp,short);if(timestamp===null||timestamp===undefined||timestamp==='')return '';const date=new Date(Number(timestamp)*1000);return Number.isFinite(date.getTime())?(short?date.toISOString().slice(11,16):date.toISOString().replace('T',' ').replace('Z','')+' (время брокера)'):'';}
+ const candleTime=c=>c?.raw_time??c?.broker_time??c?.utc_time;
  const feedUtcVerified=()=>view?.feed?.timestamp_semantics==='VERIFIED';
  function utcLabel(timestamp,short=false){
   if(!feedUtcVerified()||timestamp===null||timestamp===undefined||timestamp==='')return '';
@@ -144,15 +147,16 @@
  }
  let v3Fresh=false,paperServerReady=false,snapshotDeadline=0,quoteDeadline=0;
  const snapshotCurrent=()=>v3Fresh&&performance.now()<snapshotDeadline;
- const quoteCurrent=()=>snapshotCurrent()&&view?.feed?.status==='FRESH'&&feedUtcVerified()&&performance.now()<quoteDeadline;
+ const quoteCurrent=()=>snapshotCurrent()&&(view?.feed?.timestamp_semantics==='BROKER_RAW'?view?.feed?.status==='OBSERVED':view?.feed?.status==='FRESH'&&feedUtcVerified()&&performance.now()<quoteDeadline);
  // PAPER commands use only the last verified MT5 quote, never a fabricated price.
- const paperPriceFree=action=>(action?.type==='command'&&['/stop','/resume_time'].includes(action.text))||['cancel_initial','v3_cancel_entry','v3_cancel_link','v3_cancel_request','paper_costs'].includes(action?.type);
+ const paperPriceFree=action=>(action?.type==='command'&&['/stop','/resume_time'].includes(action.text))||['cancel_initial','v3_cancel_entry','v3_cancel_link','v3_cancel_request','paper_costs','candle_recovery_settings','candle_recovery_resume'].includes(action?.type);
  function paperQuoteAvailable(q=view?.paper?.command_quote){
-  return q?.available===true&&q.source==='LAST_VERIFIED_MT5'&&[q.bid,q.ask].every(x=>['string','number'].includes(typeof x)&&x!==''&&Number.isFinite(Number(x))&&Number(x)>0)&&Number(q.ask)>=Number(q.bid)&&typeof q.timestamp==='number'&&Number.isFinite(q.timestamp)&&q.timestamp>0&&Number.isFinite(new Date(q.timestamp*1000).getTime())&&typeof q.age_seconds==='number'&&Number.isFinite(q.age_seconds)&&q.age_seconds>=-2;
+  return q?.available===true&&['LAST_VERIFIED_MT5','LAST_OBSERVED_MT5'].includes(q.source)&&[q.bid,q.ask].every(x=>['string','number'].includes(typeof x)&&x!==''&&Number.isFinite(Number(x))&&Number(x)>0)&&Number(q.ask)>=Number(q.bid)&&typeof q.timestamp==='number'&&Number.isFinite(q.timestamp)&&q.timestamp>0&&Number.isFinite(new Date(q.timestamp*1000).getTime())&&(q.source==='LAST_OBSERVED_MT5'||(typeof q.age_seconds==='number'&&Number.isFinite(q.age_seconds)&&q.age_seconds>=-2));
  }
  const commandQuoteReady=action=>mode==='paper'?(paperPriceFree(action)||paperQuoteAvailable()):quoteCurrent();
  function paperQuoteText(q=view?.paper?.command_quote){
   if(!paperQuoteAvailable(q))return 'PAPER: последняя проверенная котировка MT5 недоступна. Действия с ценой заблокированы.';
+  if(q.source==='LAST_OBSERVED_MT5')return 'PAPER: последняя полученная цена MT5 · Bid '+q.bid+' / Ask '+q.ask+' · '+new Date(q.timestamp*1000).toISOString().replace('T',' ').replace('Z','')+' (время брокера).';
   return 'PAPER: '+(q.stale?'используется СТАРАЯ последняя проверенная цена MT5':'последняя проверенная цена MT5')+' · Bid '+q.bid+' / Ask '+q.ask+' · возраст '+q.age_seconds.toFixed(1)+' с · '+new Date(q.timestamp*1000).toISOString()+'. Это модель, не текущая цена исполнения LIVE.';
  }
  function acceptSnapshotFreshness(v,started){
@@ -176,9 +180,9 @@
  const v3Enabled=()=>view?.recovery_mode==='V3';
  const v3Blocked=(action=null)=>!view||!(mode==='paper'?paperServerReady&&commandQuoteReady(action):quoteCurrent())||busy||!!pending||view.read_only||!!view.manual_reason||!!view.migration_block||!!view.time_block;
  function connectionLabel(){
-  const status=view?.feed?.status,verified=feedUtcVerified(),fresh=quoteCurrent();
+  const status=view?.feed?.status,verified=feedUtcVerified()||brokerTime(),fresh=brokerTime()?view?.feed?.status==='OBSERVED':quoteCurrent();
   const role=mode==='paper'?'PAPER':view?.read_only?'LIVE · READ ONLY':'LIVE';
-  const warning=!v3Fresh?'нет свежего снимка':!verified?'время не проверено':status!=='FRESH'?'котировки не свежие':'';
+  const warning=!v3Fresh?'нет свежего снимка':!verified?'время не проверено':!['FRESH','OBSERVED'].includes(status)?'котировки не получены':'';
   $('drawer-toggle').textContent='Команды';
   $('drawer-toggle').dataset.warning='false';$('drawer-toggle').title=role+' · '+(warning||'Свежие данные')+' · возраст котировки: '+(view?.feed?.age_seconds??'—')+' сек.';
   svg.dataset.feedFresh=String(fresh);
@@ -216,7 +220,7 @@
   $('recovery-sl-summary').textContent='SL новых корзин · '+(config?.recovery_sl_distance??'—');
   $('recovery-offset-summary').textContent='Отступ STOP от M1 · '+(view?.v3_settings?.entry_distance??'—');
   for(const id of ['recovery-profile-apply','recovery-profile-save','recovery-save-sl','recovery-profile-save-list'])$(id).disabled=blocked;
-  if(!available){$('v3-submit-entry').disabled=true;if(!view?.v3_link)$('v3-link-toggle').disabled=true;}
+  if(!available){$('candle-resume').disabled=true;if(!view?.v3_link)$('v3-link-toggle').disabled=true;}
  }
  const positiveDecimal=(value,label)=>{const raw=String(value).trim();if(!/^\d+(\.\d+)?$/.test(raw)||!Number.isFinite(Number(raw))||Number(raw)<=0)throw Error(label+': требуется положительное десятичное число без округления.');return raw;};
  async function saveProfileConfig(config,message){if(v3Blocked()||!v3Enabled()||!profileConfig())return;const action={type:'recovery_profiles',cycle_id:view.cycle_id,...config},revision=view.revision,scope=view.scope;if(!confirm(message+'\nИзменится только следующая корзина. Открытые, ожидающие и запланированные заявки сохраняют свой профиль и SL.'))return;await send(action,revision,scope);}
@@ -229,17 +233,13 @@
  $('recovery-profile-apply').onclick=async()=>{if(v3Blocked()||!v3Enabled())return;try{const p=profileConfig()?.profiles.find(p=>p.id===$('recovery-profile-select').value);if(!p)throw Error('Выберите сохранённый профиль.');const revision=view.revision,scope=view.scope;if(!confirm('Выбрать для следующих корзин?\n'+profileDetails(p)+'\nОткрытые и ожидающие заявки не изменятся.'))return;await send({type:'recovery_profile_select',cycle_id:view.cycle_id,profile_id:p.id},revision,scope);}catch(e){error(e.message);}};
  $('recovery-profile-save').onclick=async()=>{try{if(profileSourceKey!==JSON.stringify(profileConfig()))throw Error('Профили изменились. Загрузите профиль заново перед сохранением.');const name=$('recovery-profile-name').value.trim();if(!name||name.length>80)throw Error('Название: от 1 до 80 символов.');if(profileRows.length<1||profileRows.length>20)throw Error('Нужно от 1 до 20 ступеней.');const stages=profileRows.map((s,i)=>({volume:positiveDecimal(s.volume,'Объём '+(i+1)),tp_distance:positiveDecimal(s.tp_distance,'TP '+(i+1))}));const p={id:profileDraft??('profile-'+Date.now().toString(36)),name,stages},config=profileConfig();checkProfileRemovals();const profiles=config.profiles.filter(x=>x.id!==p.id&&!profileRemoved.has(x.id)).concat([p]);await saveProfileConfig({...config,profiles,selected_profile_id:p.id},'Сохранить и выбрать профиль?\n'+profileDetails(p));}catch(e){error(e.message);}};
  $('recovery-save-sl').onclick=async()=>{try{await saveProfileConfig({...profileConfig(),recovery_sl_distance:positiveDecimal($('recovery-sl-distance').value,'SL')},'Сохранить SL для новых корзин: '+$('recovery-sl-distance').value+'?');}catch(e){error(e.message);}};
- function v3InputMode(){
-  const stop=$('v3-order-type').value==='STOP';
-  const now=$('v3-timing').querySelector('option[value="now"]');now.disabled=stop;
-  if(stop&&$('v3-timing').value==='now')$('v3-timing').value='current';
-  const candle=$('v3-timing').value!=='now';$('v3-side').disabled=candle;
-  $('v3-direction-note').textContent=candle?'Направление — цвет выбранной свечи. При doji ордера не выставляются.':'Направление выбираете вы. Фактическая цена зависит от исполнения.';
- }
  function v3FillSettings(){
   if(!view)return;
   profileRemoved.clear();$('recovery-profile-removals').textContent='';
   $('v3-setting-distance').value=view.v3_settings?.entry_distance??'1.00';
+  const settings=view.candle_recovery?.settings??{};
+  $('candle-trigger-1').value=settings.trigger_1??'0.25';$('candle-trigger-2').value=settings.trigger_2??'0.40';$('candle-offset-1').value=settings.offset_1??'0.25';
+  $('candle-resume-volume').value=view.candle_recovery?.volume??'0.02';
   $('recovery-sl-distance').value=profileConfig()?.recovery_sl_distance??'';
   loadProfileDraft(profileConfig()?.profiles.find(p=>p.id===profileConfig().selected_profile_id));
  }
@@ -258,12 +258,12 @@
   $('v3-sl-minus').disabled=blocked||!enabled||controls.can_adjust_sl!==true||!Number.isFinite(distance)||distance<=.1;
   $('v3-sl-plus').disabled=blocked||!enabled||controls.can_adjust_sl!==true||!Number.isFinite(distance)||distance<0;
   $('v3-sl-confirm').disabled=blocked||!enabled||controls.can_adjust_sl!==true||!v3SlDraft||Number(v3SlDraft.distance)===Number(view?.v3_sl_distance);
-  $('v3-sl-status').textContent='Расстояние SL от входа для действующих позиций. Шаг 0.10. Изменения отправляются только кнопкой «Подтвердить». Связанные триггеры следуют за SL первой ступени; частичный отказ требует сверки.';
-  $('v3-submit-entry').disabled=blocked||!enabled||controls.can_enter!==true;
+  $('v3-sl-status').textContent='Расстояние SL от входа для действующих позиций. Шаг 0.10. Изменения отправляются только кнопкой «Подтвердить». Ранее выставленные триггеры остаются на своём уровне.';
+  $('candle-settings-save').disabled=blocked||!enabled;
+  $('candle-resume').disabled=blocked||!enabled||view?.candle_recovery?.manual_required!==true;
+  $('candle-recovery-status').textContent=view?.candle_recovery?.manual_required?'Автоматические входы приостановлены. Укажите объём и профиль TP, затем запустите следование свечам.':'Следование свечам: объём '+(view?.candle_recovery?.volume??'—');
   $('v3-cancel-request').hidden=!view?.v3_request;
   $('v3-cancel-request').disabled=v3Blocked({type:'v3_cancel_request'})||!enabled||!view?.v3_request;
-  const request=view?.v3_request;const targetTime=request&&Number.isFinite(Number(request.bar_id))?(utcLabel(Number(request.bar_id)+60)?utcLabel(Number(request.bar_id)+60).slice(11,19)+' UTC':'выбранной свечи (время не проверено)'):'выбранной свечи';
-  $('v3-request-status').textContent=request?'Ожидается закрытие '+targetTime+': '+request.order_type+', '+profileSummary(request.recovery_profile)+'. Направление по цвету свечи; doji — пропуск.':'Нет запланированного входа. Для следующей попытки RECOVERY дождитесь закрытия всей корзины.';
   const linked=!!view?.v3_link,canCancel=controls.can_cancel_link===true;
   $('v3-link-toggle').textContent=linked?'Отменить триггеры на SL':'Выставить триггеры на SL';
   $('v3-link-toggle').dataset.cancel=String(linked);
@@ -271,14 +271,10 @@
   const link=view?.v3_link;
   $('v3-link-status').textContent=linked?(link.cancel?'Отмена запрошена; ожидается сверка MT5.':link.replace?'Перенос SL и связанных триггеров; ожидается сверка.':profileSummary(link.recovery_profile)+' · '+link.side+' STOP на '+link.price+'.'):'';
   $('v3-link-status').hidden=!linked;
-  $('v3-control-reason').textContent=!v3Fresh?(mode==='paper'&&paperServerReady?'Свежесть данных проверяется сервером при выполнении команды.':'Ожидание данных сервера.'):friendlyReason(controls.reason);
   $('v3-cancel-entry').hidden=controls.can_cancel_entry!==true;
   $('v3-cancel-entry').disabled=v3Blocked({type:'v3_cancel_entry'})||!enabled||controls.can_cancel_entry!==true;
-  $('v3-entry-distance').textContent='STOP: от Close выбранной свечи на '+(view?.v3_settings?.entry_distance??'—')+'. Объём и TP — по выбранному профилю.';
   renderProfiles();
-  v3InputMode();
  }
- $('v3-order-type').onchange=v3InputMode;$('v3-timing').onchange=v3InputMode;
  // Each drawer owns its state; opening one never opens or closes the other.
  const sidePanelOrder=[],sidePanelDragCancels=[];
  const cancelSidePanelDrags=()=>sidePanelDragCancels.forEach(cancel=>cancel());
@@ -290,7 +286,7 @@
   if(open){sidePanelOrder.push(name);sidePanelOrder.forEach((key,i)=>{$('v3-'+key+'-panel').style.zIndex=String(30+i);});$('close-'+name+'-panel').focus({preventScroll:true});}
   else {if(name==='sl'&&typeof clearSlDraft==='function')clearSlDraft();if(restoreFocus)toggle.focus({preventScroll:true});}
  }
- for(const name of ['sl','entry']){
+ for(const name of ['sl']){
   const handle=$('toggle-'+name+'-panel'),panel=$('v3-'+name+'-panel');
   let drag=null,suppressClick=false;
   const reset=()=>{drag=null;panel.style.transform='';panel.classList.toggle('dragging',false);};
@@ -323,8 +319,9 @@
   handle.addEventListener('pointercancel',cancel);handle.addEventListener('lostpointercapture',cancel);
   $('close-'+name+'-panel').onclick=()=>{cancel();setSidePanel(name,false,true);};
  }
+ $('candle-settings-save').onclick=async()=>{if(v3Blocked()||!v3Enabled())return;try{const action={type:'candle_recovery_settings',cycle_id:view.cycle_id,trigger_1:positiveDecimal($('candle-trigger-1').value,'Первый порог'),trigger_2:positiveDecimal($('candle-trigger-2').value,'Второй порог'),offset_1:positiveDecimal($('candle-offset-1').value,'Отступ SL')};if(Number(action.trigger_2)<=Number(action.trigger_1))throw Error('Второй порог должен быть больше первого.');const revision=view.revision,scope=view.scope;if(!confirm('Сохранить пороги переноса SL?'))return;await send(action,revision,scope);}catch(e){error(e.message);}};
+ $('candle-resume').onclick=async()=>{if(v3Blocked()||!v3Enabled()||view?.candle_recovery?.manual_required!==true)return;try{const volume=positiveDecimal($('candle-resume-volume').value,'Объём'),profile=profileConfig()?.profiles.find(p=>p.id===$('recovery-profile-select').value);if(!profile)throw Error('Выберите сохранённый профиль TP.');if(Number(profileTotal(profile.stages))!==Number(volume))throw Error('Объём должен совпадать с суммой ступеней профиля.');const action={type:'candle_recovery_resume',cycle_id:view.cycle_id,volume,profile_id:profile.id},revision=view.revision,scope=view.scope;if(!confirm('Возобновить следование свечам?\n'+profileDetails(profile)))return;await send(action,revision,scope);}catch(e){error(e.message);}};
  $('save-v3-settings').onclick=async()=>{if(v3Blocked()||!v3Enabled())return;try{const distance=positiveDecimal($('v3-setting-distance').value,'Отступ'),revision=view.revision,scope=view.scope;if(!confirm('Сохранить отступ RECOVERY от Close: '+distance+'?'))return;await send({type:'v3_settings',cycle_id:view.cycle_id,entry_distance:distance},revision,scope);}catch(e){error(e.message);}};
- $('v3-submit-entry').onclick=async()=>{if(v3Blocked()||!v3Enabled()||view.v3_controls?.can_enter!==true||!view.selected_recovery_profile)return;try{const action={type:'v3_entry',cycle_id:view.cycle_id,order_type:$('v3-order-type').value,timing:$('v3-timing').value,side:$('v3-side').value},revision=view.revision,scope=view.scope;if(action.order_type==='STOP'&&action.timing==='now')throw Error('STOP выставляется только после текущей или следующей M1.');const timing=action.timing==='now'?'Сейчас':action.timing==='current'?'После закрытия текущей M1':'После закрытия следующей M1';if(action.order_type==='MARKET'&&!confirm((mode==='paper'?'СИМУЛЯТОР':'ТОРГОВЛЯ')+' — '+action.order_type+', '+profileDetails(view.selected_recovery_profile)+'\nSL: '+view.selected_recovery_profile.sl_distance+'\n'+timing+'\nНаправление: '+(action.timing==='now'?action.side:'по цвету свечи; doji — пропуск')+(action.order_type==='STOP'?'\nОтступ от Close: '+view.v3_settings.entry_distance:(mode==='paper'?'\n'+paperQuoteText()+'\nСервер использует последнюю проверенную MT5 котировку на момент команды.':'\nЦена определяется свежей котировкой сервера в момент исполнения, а не показанной ранее ценой'))+'\nПосле исполнения бот сопровождает корзину.'))return;await send(action,revision,scope);}catch(e){error(e.message);}};
  $('v3-cancel-request').onclick=async()=>{if(v3Blocked({type:'v3_cancel_request'})||!v3Enabled()||!view.v3_request)return;const action={type:'v3_cancel_request',cycle_id:view.cycle_id},revision=view.revision,scope=view.scope;try{await send(action,revision,scope);}catch(e){error(e.message);}};
  $('v3-link-toggle').onclick=async()=>{if(v3Blocked({type:view?.v3_link?'v3_cancel_link':'v3_link'})||!v3Enabled())return;try{const cancel=!!view.v3_link;if(cancel?view.v3_controls?.can_cancel_link!==true:view.v3_controls?.can_link!==true||!view.selected_recovery_profile)return;const action=cancel?{type:'v3_cancel_link',cycle_id:view.cycle_id}:{type:'v3_link',cycle_id:view.cycle_id,expected_positions:view.positions.map(p=>p.id).sort()},revision=view.revision,scope=view.scope;await send(action,revision,scope);}catch(e){error(e.message);}};
  $('v3-cancel-entry').onclick=async()=>{if(v3Blocked({type:'v3_cancel_entry'})||!v3Enabled()||view.v3_controls?.can_cancel_entry!==true)return;try{await send({type:'v3_cancel_entry',cycle_id:view.cycle_id},view.revision,view.scope);}catch(e){error(e.message);}};
@@ -364,7 +361,7 @@
   const badgeX=Math.max(500,998-quoteWidth);plotRight=badgeX-18;
   const d=domain(),y=p=>plotBottom-(p-d.min)/(d.max-d.min)*plotHeight;svg.replaceChildren();
   for(let i=0;i<=6;i++){const price=d.min+(d.max-d.min)*i/6,py=y(price);svg.append(node('line',{x1:0,x2:plotRight,y1:py,y2:py,stroke:colors.grid}),node('text',{x:badgeX+7,y:py+5,fill:'#afc0d2','font-size':labelSize},price.toFixed(2)));}
-  const candles=visibleCandles(),w=(plotRight-20)/Math.max(3,candles.length+2);svg.dataset.firstCandle=String(candles[0]?.utc_time??'');svg.dataset.visibleCount=String(candles.length);candles.forEach((c,i)=>{const x=10+(i+.5)*w,green=Number(c.close)>=Number(c.open),color=green?colors.up:colors.down;svg.append(node('line',{x1:x,x2:x,y1:y(Number(c.high)),y2:y(Number(c.low)),stroke:color}),node('rect',{x:x-w*.3,y:Math.min(y(Number(c.open)),y(Number(c.close))),width:Math.max(2,w*.6),height:Math.max(1,Math.abs(y(Number(c.open))-y(Number(c.close)))),fill:color}));});
+  const candles=visibleCandles(),w=(plotRight-20)/Math.max(3,candles.length+2);svg.dataset.firstCandle=String(candleTime(candles[0])??'');svg.dataset.visibleCount=String(candles.length);candles.forEach((c,i)=>{const x=10+(i+.5)*w,green=Number(c.close)>=Number(c.open),color=green?colors.up:colors.down;svg.append(node('line',{x1:x,x2:x,y1:y(Number(c.high)),y2:y(Number(c.low)),stroke:color}),node('rect',{x:x-w*.3,y:Math.min(y(Number(c.open)),y(Number(c.close))),width:Math.max(2,w*.6),height:Math.max(1,Math.abs(y(Number(c.open))-y(Number(c.close)))),fill:color}));});
   for(const l of lines){const py=y(l.price);if(py<0||py>frameHeight)continue;const g=node('g',{'data-line':l.key,visibility:prefs.mainCycle?'visible':'hidden'});g.append(node('line',{x1:0,x2:plotRight,y1:py,y2:py,stroke:l.color,'stroke-width':2,'stroke-dasharray':'none'}),node('line',{x1:0,x2:plotRight,y1:py,y2:py,stroke:'transparent','stroke-width':18}));g.append(node('title',{},l.label+' '+l.price.toFixed(2)));if(!labelRows.some(row=>Math.abs(row-py)<labelSize)){g.append(node('text',{x:badgeX+7,y:py-5,fill:l.color,'font-size':labelSize-2},l.price.toFixed(2)));labelRows.push(py);}svg.append(g);}
   // Bid/Ask are display-only live quote lines, never draggable trading levels.
   const quoteLabels=[];
@@ -378,9 +375,10 @@
    const g=node('g',{'data-quote':key,'pointer-events':'none'});
    g.append(node('line',{x1:0,x2:badgeX-5,y1:py,y2:py,stroke:color,'stroke-width':1.5,'stroke-dasharray':'3 4'}),node('line',{x1:badgeX-5,x2:badgeX,y1:py,y2:ly,stroke:color}),node('rect',{x:badgeX,y:ly-labelSize/2-5,width:998-badgeX,height:labelSize+10,rx:7,fill:'#08090b',stroke:color}),node('text',{x:badgeX+7,y:ly+labelSize/3,fill:'#f1f3f5','font-size':labelSize*.9},quoteText(key)));svg.append(g);
   }
-  candles.forEach((c,i)=>{if(i%Math.max(1,Math.floor(candles.length/5))===0&&utcLabel(c.utc_time,true)){const label=utcLabel(c.utc_time,true);svg.append(node('text',{x:10+(i+.5)*w,y:frameHeight-10,fill:'#969ba6','font-size':labelSize},label));}});
+  candles.forEach((c,i)=>{if(i%Math.max(1,Math.floor(candles.length/5))===0&&marketLabel(candleTime(c),true)){const label=marketLabel(candleTime(c),true);svg.append(node('text',{x:10+(i+.5)*w,y:frameHeight-10,fill:'#969ba6','font-size':labelSize},label));}});
   svg.append(node('text',{x:badgeX+7,y:frameHeight-10,fill:'#969ba6','font-size':labelSize},feedUtcVerified()?'UTC':'RAW'));
-  if(!feedUtcVerified())svg.append(node('title',{},'Время MT5 не проверено; часовые метки скрыты.'));
+  if(view?.feed?.timestamp_semantics==='BROKER_RAW')svg.append(node('title',{},'Метки времени брокера MT5; соответствие UTC не заявляется.'));
+  else if(!feedUtcVerified())svg.append(node('title',{},'Время MT5 не проверено; часовые метки скрыты.'));
   if(!candles.length)svg.append(node('text',{x:300,y:250,fill:'#969ba6','font-size':20},'Ожидание данных MT5'));
   if(preview){const py=y(preview.value);svg.append(node('line',{x1:0,x2:plotRight,y1:py,y2:py,stroke:'#fff','stroke-width':3,'stroke-dasharray':'none'}));}
   drawAnalysis();
@@ -404,7 +402,7 @@
   if(pointers.size>1){clearTimeout(hold);gesture=null;pinch={distance:distanceBetween([...pointers.values()]),count:visibleCount,zoom};return;}
   const l=lines.find(l=>l.key===e.target.closest('[data-line]')?.dataset.line);
   gesture={id:e.pointerId,start:e.clientY,startX:e.clientX,pan,offset:timeOffset,span:domain().max-domain().min,line:l,drag:false,moved:false};
-  if(l&&l.kind!=='entry')hold=setTimeout(()=>{if(gesture&&!gesture.moved&&gesture.id===e.pointerId){if(openPreview(l,l.price,true))gesture.drag=true;}},1000);
+  if(l&&l.kind!=='entry')hold=setTimeout(()=>{if(gesture&&!gesture.moved&&gesture.id===e.pointerId){if(openPreview(l,l.price,true))gesture.drag=true;}},500);
  });
  svg.addEventListener('pointermove',e=>{
   if(!pointers.has(e.pointerId))return;pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
@@ -463,11 +461,12 @@
   $('phase').textContent=view.phase;$('cycle').textContent=view.cycle_id??'Ожидание цикла';$('debt').textContent=view.debt+' UST';$('realized').textContent='Учёт с переносом: '+view.realized+' UST';$('feed-status').textContent=view.feed.status;$('mode').textContent=mode==='paper'?'PAPER · без реальных сделок':view.read_only?'READ_ONLY':view.stopped?'Новые входы остановлены':'EXECUTION';
   $('safety').textContent=''; // Safety reasons remain visible in the colored activity area, without duplicate raw labels.
   $('quote').textContent='Bid '+(view.feed.quote?.bid??'—')+' / Ask '+(view.feed.quote?.ask??'—')+' · возраст '+(view.feed.age_seconds??'—')+' сек.';
-  $('source-label').textContent=(mode==='paper'?'Источник: MT5 read-only / бумажные исполнения':'Источник: MT5 / торговый контур')+' · '+(utcLabel(view.feed.timestamp)||'время MT5 не проверено');
+  $('source-label').textContent=(mode==='paper'?'Источник: MT5 read-only / бумажные исполнения':'Источник: MT5 / торговый контур')+' · '+(marketLabel(view.feed.timestamp)||'время MT5 не получено');
   if(mode==='paper'){$('paper-command-quote').textContent=paperQuoteText();$('paper-command-quote').dataset.tone=view.paper?.command_quote?.stale?'warning':'info';$('paper-status').textContent=view.paper?.paused_gap?'Перерыв данных или перезапуск. Пропущенные исполнения не восстанавливаются; подтвердите продолжение.':'Моделируются только наблюдаемые свежие тики. Пропущенный путь цены неизвестен.';if(document.activeElement!==$('paper-cost'))$('paper-cost').value=view.paper?.commission_per_lot_side??'0';}
   $('edit-status').textContent=view.edit?'Правка '+view.edit.stage+': показываются фактические данные брокера. При частичном отказе автоматизация остановится.':'';$('journal').textContent=view.journal.join('\n');
   $('request-status').textContent=pending?'Запрос '+pending+': '+(pendingScope===view.scope?view.action_results[pending]?.status??'ожидание':'другой контекст')+'. До сверки новые команды запрещены. При UNKNOWN проверьте журнал и брокера на VPS; перезагрузка не разрешает повтор.':'';
   for(const id of ['start','stop','resume','reset','cancel-initial','save-settings','reverse-enable','reverse-disable','save-tp-grid','apply-level','paper-resume','paper-flatten','paper-save-cost'])$(id).disabled=!!pending||busy;
+  $('paper-flatten').disabled=!view?.cycle_id||!view.positions?.length||v3Blocked({type:'candle_close_all'});
   $('own-entry-sl').disabled=!!pending||busy||view.read_only||!view.positions.length||(!v3Enabled()||view.v3_controls?.can_own_entry_sl!==true)||!!view.edit||!!view.manual_close||!!view.manual_reason||!!view.migration_block||!!view.time_block;
   $('paper-interrupt').disabled=paperInterruptDisabled();
   const interrupted=view.paper?.last_interrupt;
@@ -503,7 +502,7 @@
   if(!confirm('СИМУЛЯТОР — прервать цикл?\nЗакрыть все виртуальные позиции ('+action.expected_positions.length+'): BUY по последнему проверенному Bid, SELL по последнему проверенному Ask.\n'+paperQuoteText()+' Отменить все ожидающие виртуальные ордера ('+action.expected_orders.length+').\nКомиссия модели: '+v.paper.commission_per_lot_side+' UST / лот / сторона. Убытки с расходами останутся в RECOVERY и истории. Новый цикл автоматически не начнётся.'+gap))return;
   try{await send(action,revision,scope);}catch(e){error(e.message);}
  };
- $('paper-flatten').onclick=async()=>{if(mode!=='paper'||!confirm('Закрыть только бумажные билеты по последней проверенной котировке MT5 и отменить бумажные STOP? Долг сохраняется.\n'+paperQuoteText()))return;try{await send({type:'paper_flatten',confirmed:true});}catch(e){error(e.message);}};
+ $('paper-flatten').onclick=async()=>{if(mode!=='paper'||!view?.cycle_id||!view.positions?.length||v3Blocked({type:'candle_close_all'})||!confirm('Закрыть все позиции симулятора по последней полученной котировке MT5 и остановить новые входы? Убытки и RECOVERY сохраняются.\n'+paperQuoteText()))return;try{await send({type:'candle_close_all',cycle_id:view.cycle_id});}catch(e){error(e.message);}};
  $('paper-save-cost').onclick=async()=>{if(mode!=='paper'||!confirm('Изменить модель комиссии для будущих бумажных исполнений?'))return;try{await send({type:'paper_costs',commission_per_lot_side:$('paper-cost').value});}catch(e){error(e.message);}};
  let logPage=0;
  async function showLogs(){const scope=$('log-scope').value;try{const r=await fetch('/api/logs?scope='+encodeURIComponent(scope)+'&page='+logPage,{headers:{'X-Local-Control':'1'},signal:AbortSignal.timeout(4000)});if(!r.ok)throw Error('Логи недоступны: '+r.status);const v=await r.json();if(scope!==$('log-scope').value)return;$('logs-view').textContent=v.text;$('logs-status').textContent='Страница '+(v.page+1)+' · ограниченная выгрузка';$('logs-prev').disabled=v.page===0;$('logs-next').disabled=!v.has_more;}catch(e){$('logs-status').textContent=e.message;}}

@@ -245,7 +245,7 @@ class OwnerMailbox:
         # Revision is validated by ActionGateway before durable reservation.
         keys = ('scope','cycle_id','phase','stopped','settings','active_settings',
                 'tp_distances','recovery_mode','v3_settings','recovery_profiles',
-                'selected_recovery_profile','v3_request','v3_link','manual_reason',
+                'candle_recovery','selected_recovery_profile','v3_request','v3_link','manual_reason',
                 'migration_block','time_block','read_only','edit','manual_close')
         result = {key: deepcopy(view.get(key)) for key in keys}
         for key in ('positions','orders'):
