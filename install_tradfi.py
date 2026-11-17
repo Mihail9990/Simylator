@@ -196,157 +196,6 @@ def _state_json(payload):
     return value
 
 
-def _inspect_paper_history(state, paper):
-    """PAPER accounts exits in seen_deals, not the LIVE consumed_deals table.
-
-    Read the persisted exchange only. Do not construct PaperSession: its startup
-    can save state, reconcile receipts and latch the restart pause. Exchange
-    history may be ahead of the controller after an interrupted tick, so seen
-    exits must be a subset, not an exact copy, of the complete exchange history.
-    """
-    def identity(value):
-        return isinstance(value, str) and bool(value)
-
-    def ids(rows):
-        if not isinstance(rows, list) or any(not isinstance(row, dict) or not identity(row.get('id')) for row in rows):
-            raise ValueError('Invalid paper records')
-        result = {row['id']: row for row in rows}
-        if len(result) != len(rows):
-            raise ValueError('Duplicate paper identity')
-        return result
-
-    def amount(value):
-        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
-            raise ValueError('Invalid paper amount')
-        number = Decimal(str(value))
-        if not number.is_finite():
-            raise ValueError('Non-finite paper amount')
-        return number
-
-    if not identity(paper.get('identity')) or not paper['identity'].startswith('PAPER-'):
-        raise ValueError('Invalid paper account')
-    if not isinstance(paper.get('paused_gap'), bool):
-        raise ValueError('Invalid paper pause')
-    orders = ids(paper.get('orders'))
-    positions = ids(paper.get('positions'))
-    deals = ids(paper.get('deals'))
-    history = ids(paper.get('order_history'))
-    if orders.keys() & history.keys():
-        raise ValueError('Duplicate paper order')
-    results = paper.get('results')
-    if not isinstance(results, dict) or any(not identity(cid) or not isinstance(result, dict)
-            or result.get('status') not in {'ACCEPTED', 'REJECTED', 'DONE'} for cid, result in results.items()):
-        raise ValueError('Unknown paper result')
-    if amount(paper['commission_per_lot_side']) < 0:
-        raise ValueError('Invalid paper costs')
-    if paper['cursor'] is not None and (type(paper['cursor']) is not int or paper['cursor'] < 0):
-        raise ValueError('Invalid paper cursor')
-    if not isinstance(paper['cursor_keys'], list) or any(not identity(key) for key in paper['cursor_keys']):
-        raise ValueError('Invalid paper cursor keys')
-    seen = state.get('seen_deals')
-    if not isinstance(seen, list) or any(not identity(ticket) for ticket in seen) or len(seen) != len(set(seen)):
-        raise ValueError('Invalid consumed paper exits')
-    commands = state.get('commands')
-    if not isinstance(commands, dict):
-        raise ValueError('Invalid paper commands')
-    statuses = {'READY', 'UNKNOWN', 'ACCEPTED', 'PENDING', 'DONE', 'REJECTED', 'CANCELLED', 'FILLED', 'OBSOLETE'}
-    for cid, command in commands.items():
-        if (not identity(cid) or not isinstance(command, dict) or command.get('id') != cid
-                or command.get('kind') not in {'STOP', 'MARKET', 'CANCEL', 'MODIFY', 'CLOSE'}
-                or command.get('status') not in statuses):
-            raise ValueError('Unknown paper command')
-        if command['status'] == 'UNKNOWN' and cid not in results:
-            raise ValueError('Unresolved paper command outcome')
-    phases = {'IDLE', 'WAIT_START', 'WAIT_CANDLE', 'COOLDOWN', 'PAUSED', 'PAUSED_CYCLE',
-              'SAFE_PAUSE', 'MANUAL', 'INITIAL_WAIT', 'INITIAL_PENDING', 'INITIAL_POSITION',
-              'RECOVERY_WAIT', 'RECOVERY_CLEANUP', 'RECOVERY_PENDING', 'RECOVERY_POSITION',
-              'V3_WAIT_ENTRY', 'V3_WAIT_CANDLE'}
-    receipts = state.get('control_receipts', {})
-    if not isinstance(receipts, dict) or any(not isinstance(row, dict) or row.get('status') not in {'APPLIED', 'REJECTED'}
-                                           for row in receipts.values()):
-        raise ValueError('Unresolved paper control action')
-    if state.get('migration_block') or state.get('recovery_mode') not in {None, 'V3'}:
-        raise ValueError('Unresolved strategy migration')
-    if amount(state.get('basket_carry', '0')) < 0:
-        raise ValueError('Invalid carried recovery')
-    if (not isinstance(state.get('stop'), bool) or state.get('phase') not in phases
-            or 'cycle' not in state or (state['cycle'] is not None and not isinstance(state['cycle'], dict))
-            or not isinstance(state.get('completed'), list)
-            or any(not isinstance(row, dict) or row.get('currency') != 'UST'
-                   for row in [state, *state['completed'], *([state['cycle']] if state['cycle'] is not None else [])])):
-        raise ValueError('Incomplete paper controller')
-    cycle = state['cycle']
-    if cycle is not None:
-        if (cycle.get('contract') != 'ticket_basket_v1' or cycle.get('recovery_mode') != 'V3'
-                or not identity(cycle.get('id')) or amount(cycle['recovery']) < 0):
-            raise ValueError('Unknown or incompatible paper cycle')
-        amount(cycle['realized'])
-    if 'account' not in state:
-        raise ValueError('Missing paper account')
-    if state['account'] != paper['identity']:
-        if state['account'] is not None or commands or deals or orders or positions or history or cycle is not None or state['completed'] or seen:
-            raise ValueError('Paper account mismatch')
-    entries, exits = {}, {}
-    for deal in deals.values():
-        if (deal.get('entry') not in {'IN', 'OUT'} or not identity(deal.get('position_id'))
-                or deal.get('side') not in {'BUY', 'SELL'} or amount(deal['volume']) <= 0
-                or amount(deal['price']) <= 0):
-            raise ValueError('Invalid paper execution')
-        for key in ('profit', 'commission', 'swap', 'fee'):
-            amount(deal[key])
-        group = entries if deal['entry'] == 'IN' else exits
-        if deal['position_id'] in group:
-            raise ValueError('Duplicate paper fill or close')
-        group[deal['position_id']] = deal
-    if not set(seen) <= {deal['id'] for deal in exits.values()} or not exits.keys() <= entries.keys():
-        raise ValueError('Missing paper execution history')
-    if positions.keys() != entries.keys() - exits.keys():
-        raise ValueError('Missing or unknown paper positions')
-    for pid, entry in entries.items():
-        order = history.get(entry.get('order_id'))
-        if (not order or order.get('status') != 'FILLED' or order.get('command_id') != entry.get('command_id')
-                or order['command_id'] not in commands):
-            raise ValueError('Missing paper entry order')
-        if entry['side'] != order.get('side') or amount(entry['volume']) != amount(order['size']):
-            raise ValueError('Paper fill differs from entry order')
-        current = positions.get(pid)
-        close = exits.get(pid)
-        if current is not None:
-            if (current.get('owned') is not True or current.get('side') != entry['side']
-                    or amount(current['size']) != amount(entry['volume']) or amount(current['entry']) != amount(entry['price'])):
-                raise ValueError('Paper position mismatch')
-            amount(current['sl']); amount(current['tp'])
-        if close is not None and (close['side'] != entry['side'] or amount(close['volume']) != amount(entry['volume'])):
-            raise ValueError('Paper close mismatch')
-    filled_orders = {entry.get('order_id') for entry in entries.values()}
-    if len(filled_orders) != len(entries):
-        raise ValueError('Duplicate paper order fill')
-    order_commands = set()
-    for oid, order in {**orders, **history}.items():
-        if (order.get('owned') is not True or order.get('command_id') not in commands
-                or order.get('side') not in {'BUY', 'SELL'} or amount(order['size']) <= 0
-                or order.get('status') not in ({'PENDING'} if oid in orders else {'FILLED', 'CANCELLED'})):
-            raise ValueError('Unknown paper order')
-        cid = order['command_id']
-        command = commands[cid]
-        if (cid in order_commands or command['kind'] not in {'STOP', 'MARKET'}
-                or order['side'] != command.get('side') or amount(order['size']) != amount(command['size'])):
-            raise ValueError('Paper order command mismatch')
-        order_commands.add(cid)
-        for key in ('price', 'sl', 'tp'):
-            amount(order[key])
-        if (order['status'] == 'FILLED') != (oid in filled_orders):
-            raise ValueError('Missing paper fill history')
-    for cid, result in results.items():
-        command = commands.get(cid)
-        if command is None:
-            raise ValueError('Paper result without controller command')
-        if result['status'] == 'ACCEPTED' and command['kind'] in {'STOP', 'MARKET'}:
-            order = orders.get(result.get('order_id')) or history.get(result.get('order_id'))
-            if order is None or order['command_id'] != cid:
-                raise ValueError('Accepted paper order missing')
-
-
 def inspect_state(root, config, instance='paper'):
     p = state_path(root, config)
     binding = binding_path(root, instance)
@@ -374,14 +223,17 @@ def inspect_state(root, config, instance='paper'):
             if s.get('ledger_contract') is not None:
                 raise ValueError('Unexpected controller ledger contract')
             paper = _state_json(db.execute('SELECT payload FROM paper_exchange WHERE id=1').fetchone()[0])
-            _inspect_paper_history(s, paper)
+            # Updating swaps code only, never reconciles or approves trading
+            # history. UNKNOWN receipts, recovery, cycles and PAPER result
+            # extensions belong to the runtime, not installer eligibility.
+            # Keep the complete exchange opaque and backed up unchanged.
             tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if 'consumed_deals' in tables and db.execute('SELECT 1 FROM consumed_deals LIMIT 1').fetchone():
                 raise ValueError('Unexpected LIVE ledger in PAPER state')
         finally:
             db.close()
     except Exception:
-        raise SetupError('Не удалось подтвердить целостность и совместимость состояния PAPER. Обновление/rollback заблокировано; SQLite сохранена. Не удаляйте базу: нужна проверка истории или неизвестных исходов команд.') from None
+        raise SetupError('Не удалось проверить файл SQLite или формат PAPER. Данные сохранены; обновление не выполнено. История сделок и исходы команд установщиком не проверяются.') from None
 
 def state_lock(root, config):
     p = state_path(root, config)
@@ -494,3 +346,197 @@ class Manager:
         path = self.root / 'data' / ('stop-' + instance + '-' + session + '.request')
         path.touch(exist_ok=True)
         return path
+
+
+def _windows_path(value):
+    """Compare native Windows paths without relying on host OS in offline tests."""
+    import ntpath
+    if not isinstance(value, str) or not ntpath.isabs(value):
+        return None
+    return ntpath.normcase(ntpath.normpath(value))
+
+
+def owned_paper_process(root, process):
+    """Strict command identity, not executable name or descendant-tree guessing.
+
+    Windows venv redirectors may execute the base python.exe. Both processes
+    retain the exact venv argv[0], service script and own config arguments.
+    The observed executable is subsequently rechecked on a held process handle.
+    """
+    import ntpath
+    root = _windows_path(str(root))
+    if root is None or not isinstance(process, dict):return False
+    args=process.get('argv');pid=process.get('pid');created=process.get('created')
+    if type(pid) is not int or pid<=0 or type(created) is not int or created<=0:return False
+    if not isinstance(args,list) or len(args)!=7 or not all(isinstance(a,str) for a in args):return False
+    if args[2:5]!=['--mode','paper','--service'] or args[5]!='--config':return False
+    script=_windows_path(args[1]);exe=_windows_path(process.get('exe'))
+    if script is None or exe is None or ntpath.basename(exe) not in ('python.exe','pythonw.exe'):return False
+    prefix=ntpath.join(root,'releases')+'\\'
+    if not script.startswith(prefix):return False
+    relative=script[len(prefix):].split('\\')
+    if len(relative)!=3 or not SHA.fullmatch(relative[0]) or relative[1:]!=['code','tradfi_main.py']:return False
+    expected=ntpath.join(root,'releases',relative[0],'venv','Scripts','python.exe')
+    return _windows_path(args[0])==_windows_path(expected) and _windows_path(args[6])==ntpath.join(root,'data','service.json')
+
+
+
+def same_cim_process(row,identity):
+    # CIM exposes microseconds, FILETIME exposes 100 ns. Compare the common
+    # precision once at discovery, then retain exact native FILETIME forever.
+    return bool(identity and identity['created']//10==int(row['created'])//10 and _windows_path(identity['exe'])==_windows_path(row['exe']))
+
+def windows_processes():
+    """Read process metadata only; no broad termination commands are executed."""
+    if os.name!='nt':raise SetupError('Остановка процессов поддерживается только в Windows.')
+    import ctypes
+    from ctypes import wintypes
+    shell=ctypes.WinDLL('shell32',use_last_error=True)
+    kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+    shell.CommandLineToArgvW.argtypes=[wintypes.LPCWSTR,ctypes.POINTER(ctypes.c_int)]
+    shell.CommandLineToArgvW.restype=ctypes.POINTER(wintypes.LPWSTR)
+    kernel.LocalFree.argtypes=[wintypes.HLOCAL];kernel.LocalFree.restype=wintypes.HLOCAL
+    command="""$ErrorActionPreference='Stop'; $p=@(Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('python.exe','pythonw.exe') } | ForEach-Object { @{pid=[int]$_.ProcessId;parent=[int]$_.ParentProcessId;exe=$_.ExecutablePath;cmd=$_.CommandLine;created=([string]$_.CreationDate.ToFileTimeUtc())} }); ConvertTo-Json -InputObject $p -Compress"""
+    executable=Path(os.environ.get('SystemRoot',r'C:\Windows'))/'System32/WindowsPowerShell/v1.0/powershell.exe'
+    result=subprocess.run([str(executable),'-NoProfile','-NonInteractive','-Command',command],capture_output=True,text=True,timeout=20,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+    if result.returncode:raise SetupError('Не удалось проверить владельцев процессов PAPER. Процессы не завершались.')
+    try:
+        rows=json.loads(result.stdout)
+        if not isinstance(rows,list):raise ValueError()
+        processes=[]
+        for row in rows:
+            if not row.get('cmd') or not row.get('exe'):continue # Access denied is not ownership evidence.
+            count=ctypes.c_int();pointer=shell.CommandLineToArgvW(row['cmd'],ctypes.byref(count))
+            if not pointer:raise ValueError()
+            try:args=[pointer[i] for i in range(count.value)]
+            finally:kernel.LocalFree(pointer)
+            try:identity=process_identity(row['pid'])
+            except (SetupError,OSError):continue # Process exited or is inaccessible; never infer ownership.
+            if not same_cim_process(row,identity):continue
+            processes.append(dict(identity,parent=row['parent'],argv=args))
+        return processes
+    except (ValueError,TypeError,KeyError):raise SetupError('Не удалось разобрать список процессов; остановка не выполнена.') from None
+
+
+def terminate_verified_process(process):
+    """Terminate only the held, revalidated process, never a reused PID/tree."""
+    if os.name!='nt':raise SetupError('Остановка процессов поддерживается только в Windows.')
+    import ctypes
+    from ctypes import wintypes
+    api=ctypes.WinDLL('kernel32',use_last_error=True)
+    api.OpenProcess.argtypes=[wintypes.DWORD,wintypes.BOOL,wintypes.DWORD];api.OpenProcess.restype=wintypes.HANDLE
+    api.CloseHandle.argtypes=[wintypes.HANDLE];api.CloseHandle.restype=wintypes.BOOL
+    api.GetProcessTimes.argtypes=[wintypes.HANDLE,*([ctypes.POINTER(wintypes.FILETIME)]*4)];api.GetProcessTimes.restype=wintypes.BOOL
+    api.QueryFullProcessImageNameW.argtypes=[wintypes.HANDLE,wintypes.DWORD,wintypes.LPWSTR,ctypes.POINTER(wintypes.DWORD)];api.QueryFullProcessImageNameW.restype=wintypes.BOOL
+    api.TerminateProcess.argtypes=[wintypes.HANDLE,wintypes.UINT];api.TerminateProcess.restype=wintypes.BOOL
+    api.WaitForSingleObject.argtypes=[wintypes.HANDLE,wintypes.DWORD];api.WaitForSingleObject.restype=wintypes.DWORD
+    handle=api.OpenProcess(0x1000|0x0001|0x00100000,False,process['pid'])
+    if not handle:
+        if ctypes.get_last_error()==87:return False # Already gone.
+        raise SetupError('Нет доступа к собственному процессу PAPER; другие процессы не затронуты.')
+    try:
+        times=[wintypes.FILETIME() for _ in range(4)]
+        size=wintypes.DWORD(32768);name=ctypes.create_unicode_buffer(size.value)
+        if not api.GetProcessTimes(handle,*[ctypes.byref(t) for t in times]) or not api.QueryFullProcessImageNameW(handle,0,name,ctypes.byref(size)):
+            raise SetupError('Не удалось повторно проверить процесс; он не завершался.')
+        created=(times[0].dwHighDateTime<<32)|times[0].dwLowDateTime
+        if created!=process['created'] or _windows_path(name.value)!=_windows_path(process['exe']):return False
+        if api.WaitForSingleObject(handle,0)==0:return False
+        if not api.TerminateProcess(handle,1) or api.WaitForSingleObject(handle,5000)!=0:
+            raise SetupError('Не подтверждено завершение собственного процесса PAPER.')
+        return True
+    finally:api.CloseHandle(handle)
+
+
+
+def process_identity(pid):
+    """Obtain stable Windows identity without executing or terminating anything."""
+    if os.name!='nt':return None
+    import ctypes
+    from ctypes import wintypes
+    api=ctypes.WinDLL('kernel32',use_last_error=True)
+    api.OpenProcess.argtypes=[wintypes.DWORD,wintypes.BOOL,wintypes.DWORD];api.OpenProcess.restype=wintypes.HANDLE
+    api.CloseHandle.argtypes=[wintypes.HANDLE];api.CloseHandle.restype=wintypes.BOOL
+    api.GetProcessTimes.argtypes=[wintypes.HANDLE,*([ctypes.POINTER(wintypes.FILETIME)]*4)];api.GetProcessTimes.restype=wintypes.BOOL
+    api.QueryFullProcessImageNameW.argtypes=[wintypes.HANDLE,wintypes.DWORD,wintypes.LPWSTR,ctypes.POINTER(wintypes.DWORD)];api.QueryFullProcessImageNameW.restype=wintypes.BOOL
+    handle=api.OpenProcess(0x1000,False,pid)
+    if not handle:raise SetupError('Не удалось записать владельца процесса PAPER.')
+    try:
+        times=[wintypes.FILETIME() for _ in range(4)];size=wintypes.DWORD(32768);name=ctypes.create_unicode_buffer(size.value)
+        if not api.GetProcessTimes(handle,*[ctypes.byref(t) for t in times]) or not api.QueryFullProcessImageNameW(handle,0,name,ctypes.byref(size)):
+            raise SetupError('Не удалось определить идентичность процесса PAPER.')
+        return dict(pid=pid,created=(times[0].dwHighDateTime<<32)|times[0].dwLowDateTime,exe=name.value)
+    finally:api.CloseHandle(handle)
+
+
+def register_process_ownership(root,pid,kind,session=None):
+    if kind not in ('service','quote_worker'):raise SetupError('Неизвестный тип процесса PAPER.')
+    identity=process_identity(pid)
+    if identity is None:return
+    root=Path(root).resolve()
+    if session is not None and not re.fullmatch('[0-9a-f]{32}',session):raise SetupError('Некорректная сессия запуска.')
+    atomic_json(root/'data'/'processes'/f"{pid}-{identity['created']}.json",dict(identity,format=1,root=str(root),kind=kind,session=session))
+
+
+def _spawn_worker(process):
+    args=process.get('argv',[])
+    if not isinstance(args,list) or len(args)<4 or args[-1]!='--multiprocessing-fork' or args[-3]!='-c':return False
+    if any(flag not in ('-B','-E','-I','-s','-S','-O','-OO','-u') for flag in args[1:-3]):return False
+    return bool(re.fullmatch(r'from multiprocessing.spawn import spawn_main; spawn_main\(parent_pid=\d+, pipe_handle=\d+\)',args[-2]))
+
+
+def owned_processes(root,processes,records=()):
+    """Root service commands plus tightly identified capture workers only."""
+    owned={p['pid']:p for p in processes if owned_paper_process(root,p)}
+    for p in processes:
+        if not _spawn_worker(p) or type(p.get('pid')) is not int or p['pid']<=0 or type(p.get('created')) is not int or p['created']<=0:continue
+        import ntpath
+        prefix=ntpath.join(_windows_path(str(root)) or '', 'releases')+'\\'
+        argv0=_windows_path(p['argv'][0]) or ''
+        rel=argv0[len(prefix):].split('\\') if argv0.startswith(prefix) else []
+        if len(rel)==4 and SHA.fullmatch(rel[0]) and rel[1:]==['venv','scripts','python.exe'] and ntpath.basename(_windows_path(p.get('exe')) or '') in ('python.exe','pythonw.exe'):
+            owned[p['pid']]=p
+        for r in records:
+            if r.get('kind')=='quote_worker' and r.get('root')==str(root) and all(r.get(k)==p.get(k) for k in ('pid','created')) and _windows_path(r.get('exe'))==_windows_path(p.get('exe')):
+                owned[p['pid']]=p
+    # A venv redirector and its base Python process may add one lineage level.
+    for _ in range(3):
+        for p in processes:
+            parent=owned.get(p.get('parent'))
+            if parent and _spawn_worker(p) and type(p.get('created')) is int and p['created']>=parent['created'] and _windows_path(p.get('exe'))==_windows_path(parent.get('exe')):
+                owned[p['pid']]=p
+    return list(owned.values())
+
+def stop_owned_paper_processes(root, *, sessions=(), grace_seconds=3, enumerate_processes=None, terminate=None, sleep=time.sleep):
+    """Stop service processes belonging to this installation, including old windows.
+
+    Installer/UI and dependency installation processes are deliberately excluded.
+    MT5 and another root cannot match the exact script + config command identity.
+    Caller must hold its operation lock to prevent a simultaneous new launch.
+    """
+    enumerate_processes=enumerate_processes or windows_processes
+    terminate=terminate or terminate_verified_process
+    root=Path(root)
+    if read_json(root/'managed-install.json')!=dict(format=2,role='paper',layout='sl_overlap_roots_v1') or read_json(root/'application.json')!=dict(format=1,role='paper'):
+        raise SetupError('Этот каталог не является установкой PAPER SL OVERLAP.')
+    for session in sessions:
+        if not isinstance(session,str) or not re.fullmatch('[0-9a-f]{32}',session):raise SetupError('Некорректная сессия остановки.')
+    records=[]
+    for path in (root/'data'/'processes').glob('*.json'):
+        try:
+            record=read_json(path)
+            if record.get('format')==1 and record.get('root')==str(root):records.append(record)
+        except (ValueError,OSError,AttributeError):continue
+    sessions=set(sessions)|{r['session'] for r in records if isinstance(r.get('session'),str) and re.fullmatch('[0-9a-f]{32}',r['session'])}
+    initial=owned_processes(root,enumerate_processes(),records)
+    for session in sessions:(root/'data'/('stop-paper-'+session+'.request')).touch(exist_ok=True)
+    if initial and grace_seconds>0:sleep(grace_seconds)
+    stopped=0
+    # Re-enumerate after the grace period; termination revalidates a held handle.
+    candidates={p['pid']:p for p in initial}
+    candidates.update({p['pid']:p for p in owned_processes(root,enumerate_processes(),records)})
+    for process in reversed(list(candidates.values())):stopped+=bool(terminate(process))
+    observed=enumerate_processes()
+    remaining=[p['pid'] for p in observed if p in owned_processes(root,observed,records) or any(p.get('pid')==old.get('pid') and p.get('created')==old.get('created') for old in candidates.values())]
+    if remaining:raise SetupError('Остались собственные процессы PAPER: '+', '.join(map(str,remaining))+'. Обновление пока не запускайте.')
+    return dict(found=len(initial),forced=stopped,remaining=[])

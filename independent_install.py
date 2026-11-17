@@ -187,6 +187,15 @@ raise SystemExit(subprocess.call([sys.executable,str(script),'--role',role,'--ro
         if not isinstance(web,dict):raise legacy.SetupError('web должен быть объектом настроек.')
         if 'password' not in web:web['password']='';legacy.atomic_json(self.config_path,config)
     def request_stop(self,session,instance=None):return super().request_stop(session,self._instance(instance))
+    def stop_processes(self,session=None):
+        with legacy.lock(migration_lock_path(self.root)),legacy.lock(self.root/'operation.lock'):
+            self._check_installation()
+            result=legacy.stop_owned_paper_processes(self.root,sessions=([session] if session else []))
+            # Inaccessible process metadata must not turn a still-held runtime
+            # lock into a false successful stop. Never force another owner off.
+            with legacy.lock(self.root/'instance-paper.lock'),legacy.state_lock(self.root,self.config()):pass
+        self.report('Процессы этой установки PAPER остановлены. MT5 и другие установки не затронуты.')
+        return result
     def launch(self,execute=False,instance=None):
         self._instance(instance)
         if self.role=='paper' and execute:raise legacy.SetupError('PAPER не допускает реальное исполнение.')
@@ -201,8 +210,11 @@ raise SystemExit(subprocess.call([sys.executable,str(script),'--role',role,'--ro
             for key in ('PYTHONPATH','PYTHONHOME','PYTHONSTARTUP'):env.pop(key,None)
             if self.role=='paper':env.pop('TRADFI_WEB_PASSWORD',None)
             args=[str(release/'venv'/'Scripts'/'python.exe'),str(release/'code'/'tradfi_main.py'),'--mode','paper','--service','--config',str(self.config_path)]
-        return subprocess.Popen(args,cwd=self.root/'data',env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
-                                creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)),session
+            process=subprocess.Popen(args,cwd=self.root/'data',env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+                                     creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+            try:legacy.register_process_ownership(self.root,process.pid,'service',session)
+            except (legacy.SetupError,OSError):self.report('Процесс запущен; запись сессии недоступна. Остановка проверит команду и владельца процесса.')
+            return process,session
 
 
 
@@ -219,9 +231,9 @@ def gui(role="paper",root=None):
     ttk.Label(app,text=role.upper()+' · '+str(root),wraplength=800).pack(padx=12,pady=10)
     output=tk.Text(app,height=19,wrap='word',state='disabled');output.pack(fill='both',expand=True,padx=12,pady=8)
     def log(text):output.configure(state='normal');output.insert('end',text+'\n');output.see('end');output.configure(state='disabled')
-    def work(fn):
+    def work(fn,allow_running=False):
         nonlocal busy
-        if busy or child:return
+        if busy or (child and not allow_running):return
         busy=True
         def run():
             try:
@@ -236,9 +248,8 @@ def gui(role="paper",root=None):
         try:manager.prepare_settings();os.startfile(str(manager.config_path),'edit')
         except Exception:messagebox.showerror('Настройки','Сначала установите приложение. Проверьте его service.json.')
     def stop():
-        if child and messagebox.askyesno('Остановка '+role.upper(),'Остановить только этот процесс? Это не закрывает позиции и не отменяет ордера.'):
-            try:manager.request_stop(session)
-            except OSError:messagebox.showerror('Остановка','Не удалось передать запрос.')
+        if not busy and messagebox.askyesno('Остановка '+role.upper(),'Остановить все процессы симулятора этой установки, включая сборщик котировок и процессы из прежних окон? Если они не ответят, они будут принудительно завершены. MT5, HTTPS-служба и другие установки не затрагиваются. Виртуальные позиции не закрываются.'):
+            work(lambda:manager.stop_processes(session),allow_running=True)
     def install():
         if not manager.pointer()['current'] and (legacy_root/'managed-install.json').exists():
             messagebox.showinfo('Сохранить прежние данные','Обнаружена прежняя общая установка. Перед переносом старой общей установки сохраните данные и используйте её прежний установщик. Simylator не изменяет LIVE и общие установки.')
@@ -248,7 +259,7 @@ def gui(role="paper",root=None):
     options=[('Установить / обновить',install),('Настройки',settings),('Запуск PAPER',lambda:launch(False)),('Rollback',lambda:work(manager.rollback))]
     for label,fn in options:
         b=ttk.Button(row,text=label,command=fn);b.pack(side='left',padx=2);buttons.append(b)
-    stop_button=ttk.Button(app,text='Остановить '+role.upper(),command=stop,state='disabled');stop_button.pack(pady=4)
+    stop_button=ttk.Button(app,text='Остановить процессы '+role.upper(),command=stop);stop_button.pack(pady=4)
     ttk.Label(app,text='Локальная панель: http://127.0.0.1:'+'8766'+'\nОбновление и остановка этого приложения не останавливают другое. MT5 остаётся внешним источником.').pack(pady=8)
     def poll():
         nonlocal child,session,busy
@@ -264,7 +275,7 @@ def gui(role="paper",root=None):
             log('Процесс завершён (код '+str(child.returncode)+').');child=None
             (root/'data'/('stop-'+role+'-'+session+'.request')).unlink(missing_ok=True)
         for b in buttons:b.configure(state='disabled' if busy or child else 'normal')
-        stop_button.configure(state='normal' if child else 'disabled');app.after(200,poll)
+        stop_button.configure(state='disabled' if busy else 'normal');app.after(200,poll)
     def close():
         if busy or child:messagebox.showinfo(role.upper(),'Дождитесь операции или остановите только этот процесс.');return
         app.destroy()

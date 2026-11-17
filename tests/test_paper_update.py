@@ -117,7 +117,7 @@ class PaperUpdateTests(unittest.TestCase):
         self.assertTrue(any(d['entry'] == 'OUT' for d in paper['deals']))
         self.assert_read_only()
 
-    def test_unknown_command_without_durable_result_blocks(self):
+    def test_unknown_command_without_durable_result_is_preserved(self):
         self.loss()
         state, paper = self.values()
         cid = next(iter(state['commands']))
@@ -125,7 +125,7 @@ class PaperUpdateTests(unittest.TestCase):
         paper['results'].pop(cid)
         self.write_values(state, paper)
         before = self.path.read_bytes()
-        with self.assertRaises(installer.SetupError): self.inspect()
+        self.inspect()
         self.assertEqual(self.path.read_bytes(), before)
 
     def test_unknown_command_with_durable_result_is_preserved_not_replayed(self):
@@ -136,7 +136,7 @@ class PaperUpdateTests(unittest.TestCase):
         self.assert_read_only()
         self.assertEqual(self.values()[0]['commands'][cid]['status'], 'UNKNOWN')
 
-    def test_malformed_and_incomplete_histories_fail_closed(self):
+    def test_only_storage_envelope_blocks_not_strategy_or_accounting(self):
         self.loss()
         original = self.values()
         mutations = {
@@ -182,10 +182,13 @@ class PaperUpdateTests(unittest.TestCase):
             with self.subTest(name=name):
                 state, paper = deepcopy(original); mutate(state, paper); self.write_values(state, paper)
                 before = self.path.read_bytes()
-                with self.assertRaises(installer.SetupError): self.inspect()
+                if name in {'schema','boolean_schema','backend','future_backend','future_ledger','live_ledger'}:
+                    with self.assertRaises(installer.SetupError): self.inspect()
+                else:
+                    self.inspect()  # Preserve opaque runtime evidence, never repair it.
                 self.assertEqual(self.path.read_bytes(), before)
 
-    def test_coherent_but_fabricated_open_fill_does_not_override_command(self):
+    def test_installer_preserves_disputed_fills_without_overriding_command(self):
         self.fixture.initial(); self.close_fixture()
         original = self.values()
         for change in ('size', 'side'):
@@ -195,7 +198,7 @@ class PaperUpdateTests(unittest.TestCase):
             else:
                 paper['deals'][0]['side'] = 'SELL'; paper['positions'][0]['side'] = 'SELL'
             self.write_values(state, paper)
-            with self.assertRaises(installer.SetupError): self.inspect()
+            self.assert_read_only()
 
     def test_database_corruption_missing_tables_rows_and_ambiguous_json_block(self):
         self.loss(); original = self.path.read_bytes()
@@ -296,15 +299,26 @@ class PaperUpdateTests(unittest.TestCase):
         self.manager.install()
         self.assertEqual(self.manager.pointer()['current'], self.new)
 
-    def test_bad_state_blocks_before_download_and_backup(self):
+    def test_unresolved_history_update_and_rollback_preserve_exact_database(self):
         self.loss(); self.installed()
-        state, paper = self.values(); state['seen_deals'].append('missing'); self.write_values(state, paper)
-        pointer = self.manager.pointer(); data = self.path.read_bytes()
-        with patch.object(self.manager, 'backup') as backup:
-            with self.assertRaises(installer.SetupError): self.manager.install()
-            backup.assert_not_called()
-        self.assertFalse(self.fetches)
-        self.assertEqual(self.manager.pointer(), pointer); self.assertEqual(self.path.read_bytes(), data)
+        state, paper = self.values()
+        state['seen_deals'].append('missing')
+        state['control_receipts']={'unresolved': {'status':'UNKNOWN'}}
+        state['migration_block']='needs runtime review'
+        # Reset result statuses legitimately extend old installer's vocabulary.
+        for result in paper['results'].values():result['status']='FILLED'
+        self.write_values(state,paper)
+        before=self.path.read_bytes()
+        self.manager.install()
+        self.assertEqual(self.manager.pointer()['current'],self.new)
+        self.assertEqual(self.path.read_bytes(),before)
+        backup=next((self.root/'backups').glob('*/state.sqlite3'))
+        with closing(sqlite3.connect(backup)) as db:
+            self.assertEqual(json.loads(db.execute('SELECT payload FROM snapshot').fetchone()[0]),state)
+            self.assertEqual(json.loads(db.execute('SELECT payload FROM paper_exchange').fetchone()[0]),paper)
+        self.manager.rollback()
+        self.assertEqual(self.manager.pointer()['current'],self.old)
+        self.assertEqual(self.path.read_bytes(),before)
 
     def test_process_and_database_locks_block_before_download(self):
         self.loss(); self.installed()

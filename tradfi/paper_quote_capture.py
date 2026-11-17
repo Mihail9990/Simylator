@@ -185,6 +185,14 @@ class ProcessQuoteReader:
         self._consumed = 0; self._acked_at = None; self._last = None; self._request_id = 0
         self.display_clock = _DisplayClock(self)
         self._process.start()
+        # Durable identity allows the installer to stop a capture orphan without
+        # touching MT5 or guessing from a generic Python process name.
+        from .managed import managed_root
+        root=managed_root()
+        if root is not None:
+            from install_tradfi import register_process_ownership, SetupError
+            try:register_process_ownership(root,self._process.pid,'quote_worker')
+            except (SetupError,OSError):pass  # Exact own-venv spawn argv remains independently verifiable.
         self._samples_in = _Receiver(self._observations)
         self._updates_in = _Receiver(self._updates, latest=True)
         self._responses_in = _Receiver(self._responses)
